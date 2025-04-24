@@ -1,0 +1,14 @@
+export NR_DPUS=512
+export NR_TASKLETS=1
+export MS=32
+export KSUB=256
+export DSUB=4
+export MAX_DPU_STORE_SIZE=1024
+export CODE_SIZE=32
+export TOPK=100
+export MAX_Q_O=8
+export MAX_PROBE_NUM=16
+export DIMM=128
+export MAX_DPU_ID=8
+export CODEBOOK_SIZE=2048
+export DEBUG=1

@@ -1,0 +1,17 @@
+*.zip
+*.gz
+sift1M/
+build/
+.vscode/
+search_dpu
+search_dpu.d 
+search_dpu.o
+test*
+*.png
+*.txt
+*.index
+*pq*
+*qs*
+/sift1B*
+/SPACE1B*
+/deep*
