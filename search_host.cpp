@@ -221,7 +221,7 @@ int main() {
 
     printf("begin to load model: MAX STORE: %d \n", MAX_DPU_STORE_SIZE);
     // index = dynamic_cast<faiss::IndexIVFPQ*>(faiss::read_index("kmeans16.index"));
-    index = dynamic_cast<faiss::IndexIVFPQ*>(faiss::read_index("sift1B_4096PQ16.index"));
+    index = dynamic_cast<faiss::IndexIVFPQ*>(faiss::read_index("sift1B_16384PQ16.index"));
 
     uint32_t nr_of_dpus;
     // auto system = dpu::DpuSet::allocate(NR_DPUS);
@@ -652,6 +652,12 @@ int main() {
             elapsed() - t0,
             avg_process);
 
+    //获取 Cp 降序排序的索引
+    std::vector<std::pair<int, int>> Cp_idx;
+    for (int32_t i = 0; i < nlist; ++i) {
+        Cp_idx.push_back(std::make_pair(Cp[i], i));
+    }
+    std::sort(Cp_idx.begin(), Cp_idx.end(), compareab);
     //获取 C_process 降序排序的索引
     std::vector<std::pair<int, int>> C_process_idx;
     for (int32_t i = 0; i < nlist; ++i) {
@@ -715,291 +721,48 @@ int main() {
     float adaptive_threadshold = THREADSHOLD;
     float adaptive_store_threadshold = THREADSHOLD;
     //将每个centroid 分配到DPU上
-    for(int i=0;i<nr_of_dpus;i++)
+    int cur_dpu = 0;
+    for(int i=0; i<nlist; i++)
     {
-        if(each_dpu_process[i] >= avg_process || dpu_store_offset[i][dpu_store_offset[i].size()-1] >= MAX_DPU_STORE_SIZE)
-            continue;
-        int begin = 0;
-        while(begin<Cp.size() && (visit[C_process_idx[begin].second]!=0 || C_process_idx[begin].first == 0))
+        int temp = 0;
+        int cur_cluster = Cp_idx[i].second;
+        while(dpu_store_offset[cur_dpu][dpu_store_offset[cur_dpu].size()-1] + Cp[cur_cluster] >= MAX_DPU_STORE_SIZE)
         {
-            visit[C_process_idx[begin].second] = 1;
-            begin++;
-        }
-        if(begin == nlist)
-            continue;
-        visit[C_process_idx[begin].second] = 1;
-        int32_t C_id = C_process_idx[begin].second;
-        int dis_id = 0;
-        int dpu_offsets = dpu_store_offset[i][dpu_store_offset[i].size()-1];
-        int j = i;
-        bool unsuitable_dpu = false;
-        if(C_process[C_id] > avg_process * 1)
-        {
-            int cnr_of_dpu = (C_process[C_id] + avg_process - 1) / avg_process; // 该centroid 应该分配到多个DPU
-            int per_process = C_process[C_id] / cnr_of_dpu;
-            float first_round_threadshold = THREADSHOLD - 0.05;
-            for(j=i ; cnr_of_dpu > 0; j = (j+1) % nr_of_dpus)
+            cur_dpu = (cur_dpu + 1) % nr_of_dpus;
+            temp++;
+            if(temp >= nr_of_dpus)
             {
-                if(j==i)
-                {
-                    first_round_threadshold += 0.05;
-                    printf("update first round threadshold : %f \n", first_round_threadshold);
-                    if(first_round_threadshold > 1.2)
-                    {
-                        printf("some error: first_round_threadshold larger than 1.2\n");
-                    }
-                }
-                dpu_offsets = dpu_store_offset[j][dpu_store_offset[j].size()-1];
-                if(each_dpu_process[j] + per_process > avg_process * first_round_threadshold || dpu_offsets + Cp[C_id] > MAX_DPU_STORE_SIZE)
-                    continue;
-                each_dpu_process[j] += per_process;
-                cnr_of_dpu--;
-                dpu_id[j].push_back(C_id);
-                max_dpu_id = std::max(max_dpu_id,(int32_t)dpu_id[j].size());
-                // for(int m=0; m<hbm_cached_ps[C_id].size();m++)
-                // {
-                //     for(int n=0; n<CACHE_LEN; n++)
-                //     {
-                //         dpu_hbm_cached_ps[j].push_back(hbm_cached_ps[C_id][m][n]);
-                //     }
-                // }
-                dpu_size[j] += Cp[C_id];
-                C_dpu[C_id].push_back(j);
-                for(int32_t k = 0; k < Cp[C_id];k++)
-                {
-                    dpu_store_ids[j].push_back(ids[C_id][k]);
-                    for(int32_t w = k*CODE_SIZE; w < (k+1)*CODE_SIZE;w++)
-                        dpu_store_code[j].push_back(new_codes[C_id][w]);
-                    dpu_offsets++;
-                }
-                max_dpu_store_size = std::max(max_dpu_store_size,dpu_offsets);
-                dpu_store_offset[j].push_back(dpu_offsets);
-                if(cnr_of_dpu == 0)
-                    break;
-            }
-            std::vector<uint16_t>().swap(new_codes[C_id]);
-            std::vector<faiss::idx_t>().swap(ids[C_id]);
-        }
-        else{
-            for(j=i ; j < nr_of_dpus; j++)
-            {
-                if(each_dpu_process[j] + C_process[C_id] <= avg_process * 1 && dpu_store_offset[j][dpu_store_offset[j].size()-1] + Cp[C_id] <= MAX_DPU_STORE_SIZE)
-                    break;
-                else
-                    continue;
-            }
-            while(j == nr_of_dpus)// 后面没有合适的DPU可以放这个元素了，增大THREADSHOLD从头来
-            {
-                for(j=0 ; j < nr_of_dpus; j++)
-                {
-                    if(each_dpu_process[j] + C_process[C_id] > avg_process * adaptive_threadshold)
-                    {
-                        continue;
-                    }
-                    else if(dpu_store_offset[j][dpu_store_offset[j].size()-1] + Cp[C_id] > MAX_DPU_STORE_SIZE)
-                    {
-                        unsuitable_dpu = true;
-                        continue;
-                    }
-                    else
-                    {
-                        break;
-                    }
-                }
-                if(j == nr_of_dpus)
-                {
-                    if(unsuitable_dpu)
-                        break;
-                    adaptive_threadshold += 0.02;
-                    if(adaptive_threadshold > 1.2)
-                    {
-                        printf("hhh\n");
-                    }
-                    printf("update adptivate threadshold: %.2f\n", adaptive_threadshold);
-                }
-            }
-            if(unsuitable_dpu && j == nr_of_dpus)
-            {
-                visit[C_id] = 2;
-                // i--;
-                continue;
-            }
-            // if(j != i)
-            //     i--;
-            each_dpu_process[j] += C_process[C_id];
-            dpu_id[j].push_back(C_id);
-            max_dpu_id = std::max(max_dpu_id,(int32_t)dpu_id[j].size());
-            // for(int m=0; m<hbm_cached_ps[C_id].size();m++)
-            // {
-            //     for(int n=0; n<CACHE_LEN; n++)
-            //     {
-            //         dpu_hbm_cached_ps[j].push_back(hbm_cached_ps[C_id][m][n]);
-            //     }
-            // }
-            dpu_size[j] += Cp[C_id];
-            C_dpu[C_id].push_back(j);
-            dpu_offsets = dpu_store_offset[j][dpu_store_offset[j].size()-1];
-            for(int32_t k = 0; k < Cp[C_id];k++)
-            {
-                dpu_store_ids[j].push_back(ids[C_id][k]);
-                for(int32_t w = k*CODE_SIZE; w < (k+1)*CODE_SIZE;w++)
-                    dpu_store_code[j].push_back(new_codes[C_id][w]);
-                dpu_offsets++;
-            }
-            max_dpu_store_size = std::max(max_dpu_store_size,dpu_offsets);
-            dpu_store_offset[j].push_back(dpu_offsets);
-            std::vector<uint16_t>().swap(new_codes[C_id]);
-            std::vector<faiss::idx_t>().swap(ids[C_id]);
-        }
-
-        while(each_dpu_process[j] < avg_process)
-        {
-            if(visit[C_dis_sorted_indices[C_id][dis_id]]!=0 || C_process[C_dis_sorted_indices[C_id][dis_id]] == 0)
-            {
-                dis_id++;
-                if(dis_id >= nlist)
-                    break;
-                continue;
-            }
-            else if(each_dpu_process[j] + C_process[C_dis_sorted_indices[C_id][dis_id]] > avg_process || dpu_offsets + Cp[C_dis_sorted_indices[C_id][dis_id]] > MAX_DPU_STORE_SIZE)
-            {
-                dis_id++;
-                if(dis_id >= nlist)
-                    break;
-                continue;
-            }
-            int next_id = C_dis_sorted_indices[C_id][dis_id];
-            visit[next_id] = 1;
-            dpu_id[j].push_back(next_id);
-            max_dpu_id = std::max(max_dpu_id,(int32_t)dpu_id[j].size());
-            // for(int m=0; m<hbm_cached_ps[next_id].size();m++)
-            // {
-            //     for(int n=0; n<CACHE_LEN; n++)
-            //     {
-            //         dpu_hbm_cached_ps[j].push_back(hbm_cached_ps[next_id][m][n]);
-            //     }
-            // }
-            each_dpu_process[j] += C_process[next_id];
-            dpu_size[j] += Cp[next_id];
-            C_dpu[next_id].push_back(j);
-            dpu_offsets = dpu_store_offset[j][dpu_store_offset[j].size()-1];
-            for(int32_t k = 0; k < Cp[next_id];k++)
-            {
-                dpu_store_ids[j].push_back(ids[next_id][k]);
-                for(int32_t w = k*CODE_SIZE; w < (k+1)*CODE_SIZE;w++)
-                    dpu_store_code[j].push_back(new_codes[next_id][w]);
-                dpu_offsets++;
-            }
-            max_dpu_store_size = std::max(max_dpu_store_size,dpu_offsets);
-            dpu_store_offset[j].push_back(dpu_offsets);
-            std::vector<uint16_t>().swap(new_codes[next_id]);
-            std::vector<faiss::idx_t>().swap(ids[next_id]);
-        }
-    }
-    for(int begin=0; begin<nlist; begin++)// 以DPU_STORE_SIZE为重点,找到最合适的DPU
-    {
-        if(visit[begin]==1)
-            continue;
-        visit[begin] = 1;
-        int32_t C_id = begin;
-        std::vector<std::pair<int, int>> Dpu_proc_idx;
-        for(int i=0; i< nr_of_dpus; i++)
-        {
-            if(dpu_store_offset[i][dpu_store_offset[i].size()-1]+Cp[C_id] < MAX_DPU_STORE_SIZE)
-            {
-                Dpu_proc_idx.push_back(std::make_pair(each_dpu_process[i], i));
+                printf("some error!!!\n");
+                return 0;
             }
         }
-        std::sort(Dpu_proc_idx.begin(), Dpu_proc_idx.end(), comparebaINT);
-        int D_id = Dpu_proc_idx[0].second;
-        int dpu_offsets = dpu_store_offset[D_id][dpu_store_offset[D_id].size()-1];
-        each_dpu_process[D_id] += C_process[C_id];
-        dpu_id[D_id].push_back(C_id);
-        max_dpu_id = std::max(max_dpu_id,(int32_t)dpu_id[D_id].size());
+        dpu_id[cur_dpu].push_back(cur_cluster);
+        visit[cur_cluster] = 1;
+        max_dpu_id = std::max(max_dpu_id,(int32_t)dpu_id[cur_dpu].size());
         // for(int m=0; m<hbm_cached_ps[C_id].size();m++)
         // {
         //     for(int n=0; n<CACHE_LEN; n++)
         //     {
-        //         dpu_hbm_cached_ps[D_id].push_back(hbm_cached_ps[C_id][m][n]);
+        //         dpu_hbm_cached_ps[j].push_back(hbm_cached_ps[C_id][m][n]);
         //     }
         // }
-        dpu_size[D_id] += Cp[C_id];
-        C_dpu[C_id].push_back(D_id);
-        for(int32_t k = 0; k < Cp[C_id];k++)
+        each_dpu_process[cur_dpu] += C_process[cur_cluster];
+        dpu_size[cur_dpu] += Cp[cur_cluster];
+        C_dpu[cur_cluster].push_back(cur_dpu);
+        int dpu_offsets = dpu_store_offset[cur_dpu][dpu_store_offset[cur_dpu].size()-1];
+        for(int32_t k = 0; k < Cp[cur_cluster];k++)
         {
-            dpu_store_ids[D_id].push_back(ids[C_id][k]);
+            dpu_store_ids[cur_dpu].push_back(ids[cur_cluster][k]);
             for(int32_t w = k*CODE_SIZE; w < (k+1)*CODE_SIZE;w++)
-                dpu_store_code[D_id].push_back(new_codes[C_id][w]);
+                dpu_store_code[cur_dpu].push_back(new_codes[cur_cluster][w]);
             dpu_offsets++;
         }
         max_dpu_store_size = std::max(max_dpu_store_size,dpu_offsets);
-        dpu_store_offset[D_id].push_back(dpu_offsets);
-        std::vector<uint16_t>().swap(new_codes[C_id]);
-        std::vector<faiss::idx_t>().swap(ids[C_id]);
+        dpu_store_offset[cur_dpu].push_back(dpu_offsets);
+        std::vector<uint16_t>().swap(new_codes[cur_cluster]);
+        std::vector<faiss::idx_t>().swap(ids[cur_cluster]);
+        cur_dpu = (cur_dpu + 1) % nr_of_dpus;
     }
-    // //从后往前又倒一次
-    // for(int i=nr_of_dpus-1;i>=0;i--)
-    // {
-    //     if(dpu_id[i].size() >= (nlist / nr_of_dpus)*3)// 超参数
-    //         continue;
-    //     int begin = 0;
-    //     while(begin<nlist && (visit[C_process_idx[begin].second]||dpu_store_offset[i][dpu_store_offset[i].size()-1]+Cp[C_process_idx[begin].second] > MAX_DPU_STORE_SIZE * 1.1))
-    //         begin++;
-    //     if(begin == nlist)
-    //         break;
-    //     visit[C_process_idx[begin].second] = true;
-    //     int32_t C_id = C_process_idx[begin].second;
-    //     int dis_id = 0;
-    //     int dpu_offsets = dpu_store_offset[i][dpu_store_offset[i].size()-1];
-    //     each_dpu_process[i] += C_process[C_id];
-    //     dpu_id[i].push_back(C_id);
-    //     max_dpu_id = std::max(max_dpu_id,(int32_t)dpu_id[i].size());
-    //     dpu_size[i] += Cp[C_id];
-    //     C_dpu[C_id].push_back(i);
-    //     for(int32_t k = 0; k < Cp[C_id];k++)
-    //     {
-    //         dpu_store_ids[i].push_back(ids[C_id][k]);
-    //         for(int32_t w = k*code_size; w < (k+1)*code_size;w++)
-    //             dpu_store_code[i].push_back(codes[C_id][w]);
-    //         dpu_offsets++;
-    //     }
-    //     max_dpu_store_size = std::max(max_dpu_store_size,dpu_offsets);
-    //     dpu_store_offset[i].push_back(dpu_offsets);
-
-    //     while(each_dpu_process[i] < avg_process && dpu_id[i].size() < (nlist / nr_of_dpus)*2)
-    //     {
-    //         if(visit[C_dis_sorted_indices[C_id][dis_id]])
-    //         {
-    //             dis_id++;
-    //             if(dis_id >= nlist)
-    //                 break;
-    //             continue;
-    //         }
-    //         else if(each_dpu_process[i] + C_process[C_dis_sorted_indices[C_id][dis_id]] > avg_process || dpu_offsets + Cp[dis_id] > MAX_DPU_STORE_SIZE)//you wu
-    //         {
-    //             dis_id++;
-    //             if(dis_id >= nlist)
-    //                 break;
-    //             continue;
-    //         }
-    //         int next_id = C_dis_sorted_indices[C_id][dis_id];
-    //         visit[next_id] = true;
-    //         dpu_id[i].push_back(next_id);
-    //         max_dpu_id = std::max(max_dpu_id,(int32_t)dpu_id[i].size());
-    //         each_dpu_process[i] += C_process[next_id];
-    //         dpu_size[i] += Cp[next_id];
-    //         C_dpu[next_id].push_back(i);
-    //         for(int32_t k = 0; k < Cp[next_id];k++)
-    //         {
-    //             dpu_store_ids[i].push_back(ids[next_id][k]);
-    //             for(int32_t w = k*code_size; w < (k+1)*code_size;w++)
-    //                 dpu_store_code[i].push_back(codes[next_id][w]);
-    //             dpu_offsets++;
-    //         }
-    //         max_dpu_store_size = std::max(max_dpu_store_size,dpu_offsets);
-    //         dpu_store_offset[i].push_back(dpu_offsets);
-    //     }
-    // }
 
     std::vector<std::vector<faiss::idx_t>>().swap(ids);
     std::vector<std::vector<uint16_t>>().swap(new_codes);

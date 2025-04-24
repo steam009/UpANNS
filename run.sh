@@ -24,6 +24,21 @@ rm dpu/search_dpu.d
 make -C dpu
 
 make
-./build/release/host > res_sift1b4096top10nprobe64_bs${BS}_ours.txt
+
+./build/release/host > res_sift1b4096top10nprobe64_bs${BS}_naive.txt
+
+export BS=100
+# export DEBUG=1
+
+make clean
+rm dpu/search_dpu
+rm dpu/search_dpu.o
+rm dpu/search_dpu.d
+
+make -C dpu
+
+make
+
+./build/release/host > res_sift1b4096top10nprobe64_bs${BS}_naive.txt
 
 

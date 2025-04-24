@@ -20,12 +20,12 @@
 // #define ETD 16 // EACH TASKLET DEAL WITH IDS AND CODES
 #define ONCEREAD ETD*NR_TASKLETS
 #define EACHTSKREAD MS*KSUB/8/NR_TASKLETS
-// __host uint64_t ins_main;
-// __host uint64_t ins_insert;
-// __host uint64_t ins_update;
-// __host uint64_t ins_calculate;
-// __host uint64_t ins_total_topk;
-// __host uint64_t ins_memory_access;
+// __host uint32_t ins_main;
+// __host uint32_t ins_insert;
+// __host uint32_t ins_update;
+// __host uint32_t ins_calculate;
+// __host uint32_t ins_total_topk;
+// __host uint32_t ins_memory_access;
 
 int first_run = 1;
 
@@ -380,12 +380,12 @@ int main(){
         // }
         // uint32_t begin = perfcounter_get();
         int temp_size = temp_result.size;
-        convertMaxHeapToMinHeap(&temp_result);
+        // convertMaxHeapToMinHeap(&temp_result);
         for(int j=temp_size;j>0;--j)
         {
-            Idx_piar max_r = pop2(&temp_result);
-            if(result.size >= TOPK && result.data[1].fir < max_r.fir)
-                break;
+            Idx_piar max_r = pop(&temp_result);
+            // if(result.size >= TOPK && result.data[1].fir < max_r.fir)
+            //     break;
             sem_take(&result_sem);
             push(&result, max_r.fir, max_r.sed);
             sem_give(&result_sem);
@@ -423,7 +423,7 @@ int main(){
     // }
     // if(t_id==0)
     // {
-    //     printf("ins_main: %lu, ins_update: %lu, ins_insert:%lu, ins_calculate:%lu, ins_total_topk:%lu, ins_memory_access:%u\n", ins_main,ins_update, ins_insert, ins_calculate,ins_total_topk,ins_memory_access);
+    //     printf("ins_main: %u, ins_update: %u, ins_insert:%u, ins_calculate:%u, ins_total_topk:%u, ins_memory_access:%u\n", ins_main,ins_update, ins_insert, ins_calculate,ins_total_topk,ins_memory_access);
     // }
     return 0;
 }

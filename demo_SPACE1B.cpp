@@ -247,11 +247,11 @@ int main() {
         std::string set_nprobs = "nprobe=" + std::to_string(NPROBS);
         params.set_index_parameters(index, set_nprobs.c_str());
 
-        nq = BS;
+        nq = 1000;
         float* xq_tmp = new float[100*nq];
         for(int i=0;i<100*(nq);i++)
         {
-            xq_tmp[i] = xq[i + 100*9000];
+            xq_tmp[i] = xq[i];
         }
         printf("[%.6f s] Perform a search on %ld queries\n",
                elapsed() - t0,
@@ -273,7 +273,7 @@ int main() {
         // evaluate result by hand.
         int n_1 = 0, n_10 = 0, n_100 = 0;
         for (int i = 0; i < nq; i++) {
-            int gt_nn = gt[i * 100 + 9000*100];
+            int gt_nn = gt[i * 100];
             for (int j = 0; j < k; j++) {
                 if (I[i * k + j] == gt_nn) {
                     if (j < 1)
