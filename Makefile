@@ -22,9 +22,8 @@ DIMM                ?= 128
 MAX_DPU_ID          ?= 8
 CODEBOOK_SIZE       ?= 4096
 ETD                 ?= 16
-NPROBS              ?= 64
+NPROBS              ?= 32
 BS                  ?= 1000
-
 
 
 

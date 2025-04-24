@@ -12,20 +12,20 @@
 #include "../include/search_type.h"
 
 #define DATASIZE 1
-#define READSIZE 48 // update_LUT中每次从MRAM读取codebook的大小
+#define READSIZE 32 // update_LUT中每次从MRAM读取codebook的大小
 #define CACHE_LEN 4
-#define CACHE_PS_LEN 800
-#define CACHE_PS_LEN_ET 80 //2048/NR_TASKLETS  // 128 
-#define CACHE_LUT_LEN_ET 320 //(8*1024)/NR_TASKLETS 
+#define CACHE_PS_LEN 1024
+#define CACHE_PS_LEN_ET 64 //2048/NR_TASKLETS  // 128
+#define CACHE_LUT_LEN_ET 256 //(8*1024)/NR_TASKLETS
 // #define ETD 16 // EACH TASKLET DEAL WITH IDS AND CODES
 #define ONCEREAD ETD*NR_TASKLETS
-#define TMP ETD*19
 #define EACHTSKREAD MS*KSUB/8/NR_TASKLETS
-__host uint64_t ins_main;
-__host uint64_t ins_insert;
-__host uint64_t ins_update;
-__host uint64_t ins_calculate;
-__host uint64_t ins_total_topk;
+// __host uint64_t ins_main;
+// __host uint64_t ins_insert;
+// __host uint64_t ins_update;
+// __host uint64_t ins_calculate;
+// __host uint64_t ins_total_topk;
+// __host uint64_t ins_memory_access;
 
 int first_run = 1;
 
@@ -53,14 +53,13 @@ __dma_aligned Heap_q result;
 
 __host int32_t offset[MAX_DPU_ID+1];//176B
 __host int32_t centroid_id[MAX_DPU_ID];//172B
-__host uint16_t code_len;
 
-__dma_aligned uint16_t LUT[KSUB*MS + 1]; //16KB KSUB*MS
+__dma_aligned uint16_t LUT[KSUB*MS + 2]; //16KB KSUB*MS
 __host uint16_t* cache_LUT = &LUT[KSUB*MS];//12KB  最大18KB
 // __dma_aligned int8_t codebook_W[CODEBOOK_SIZE];//8KB
 // __dma_aligned bool LUT_calculated[KSUB*MS];//1KB
-__dma_aligned int64_t cur_ids[TMP];//2KB
-__dma_aligned uint16_t cur_codes[TMP * CODE_SIZE];//8KB  能不能试试分成两次读看看 cur_codes 大小一定要大于READSIZE * NR_TASKLETS
+__dma_aligned int64_t cur_ids[ONCEREAD];//2KB
+__dma_aligned uint16_t cur_codes[ONCEREAD * CODE_SIZE];//8KB  能不能试试分成两次读看看 cur_codes 大小一定要大于READSIZE * NR_TASKLETS
 __dma_aligned int8_t cur_q_c[DIMM];//512B
 // __dma_aligned int8_t rasidual[NR_TASKLETS];//512B
 
@@ -179,7 +178,7 @@ void updated_LUT(int i, int c_id)
     uint8_t read_count = 0;//记录读MRAM的次数
     int next_adr = 0;//记录下一个地址的起始位置
     int begin_cb_adr = begin_MS * READSIZE;
-    for(int k=begin_MS; k<end_MS && k<MS; k++)//计算LUT 每个线程处理4个k
+    for(int k=begin_MS; k<end_MS && k < MS; k++)//计算LUT 每个线程处理4个k
     {
         read_count = 0;
         for(int m=0; m<KSUB; m+=nr_of_read)
@@ -261,11 +260,10 @@ void updated_LUT(int i, int c_id)
 
 int main(){
     // Profiling
-    perfcounter_config(COUNT_CYCLES, true);
+    // perfcounter_config(COUNT_CYCLES, true);
     // printf("current thread:%d ", me());
 
     int t_id = me();
-    code_len = CODE_SIZE;
     if(t_id==0){
         mem_reset();
         result.size = 0;
@@ -305,30 +303,32 @@ int main(){
                 }
             }
             uint32_t ids_size = offset[c_id +1] - offset[c_id];
-            uint32_t begin = perfcounter_get();
+            // uint32_t begin = perfcounter_get();
             updated_LUT(j, c_id);
-            uint32_t end = perfcounter_get();
-            if(t_id==0)
-                ins_update += (end - begin);
+            // uint32_t end = perfcounter_get();
+            // if(t_id==0)
+            //     ins_update += (end - begin);
             copied_ids = 0; 
             while(copied_ids < ids_size)
             {
-                uint32_t begin2 = perfcounter_get();
+                // uint32_t begin3 = perfcounter_get();
                 len = MIN(ONCEREAD, (ids_size-copied_ids));
                 mram_read(&ids[offset[c_id]+copied_ids+t_id * ETD],cur_ids + t_id * ETD, ALIGN(MIN(2048,ETD*8),8));
                 mram_read(&codes[(offset[c_id]+copied_ids+t_id * ETD)*CODE_SIZE], cur_codes + t_id * ETD * CODE_SIZE, ALIGN(MIN(2048,(ETD)*CODE_SIZE)*2,8));
                 copied_ids += ONCEREAD;
                 int dist_size = MIN(len, (t_id+1) * ETD);
+                // uint32_t end3 = perfcounter_get();
+                // if(t_id==0)
+                //     ins_memory_access += (end3 - begin3);
                 // uint32_t begin2 = perfcounter_get();
                 for(ita = t_id * ETD; ita < dist_size; ita++)
                 {
                     int32_t dis_te = 0;
-                    // int LUT_len = cur_codes[ita*CODE_SIZE];
-                    uint16_t cur_code_len = code_len;
+                    // uint16_t LUT_len = (cur_codes[ita*CODE_SIZE] & 15) + 1;
                     // LUT_len ++ ;
                     // int no_cache_len = (((cur_codes[ita*CODE_SIZE]) & 0xf ) + 1) * 2;
                     uint16_t* c_codes = &cur_codes[ita*CODE_SIZE];
-                    for(uint8_t k = 0; k < (uint8_t)cur_code_len; k++)
+                    for(uint8_t k = 0; k < 16; k++)
                     {
                         // if(cur_codes[ita*CODE_SIZE + LUT_idx + 3]+k*KSUB > 8192)
                         // {
@@ -346,7 +346,7 @@ int main(){
                         // }
                     }
                     // sem_take(&result_sem); // 加锁大概多 20 ms
-                    begin = perfcounter_get();
+                    // begin = perfcounter_get();
                     // printf("ita: %d tasklet id: %d ",ita,t_id);
                     // if(cur_ids[ita]==145976)
                     // {
@@ -361,14 +361,14 @@ int main(){
                     //     printf("\n j:%d ita: %d tasklet id: %d cur_ids[ita]: %lld dis_te: %u \n",j,ita,t_id,cur_ids[ita],dis_te);
                     // }
                     push(&temp_result, dis_te , cur_ids[ita]);
-                    end = perfcounter_get();
-                    if(t_id==0)
-                        ins_insert += (end - begin);
+                    // end = perfcounter_get();
+                    // if(t_id==0)
+                    //     ins_insert += (end - begin);
                     // sem_give(&result_sem);
                 }
-                uint32_t end2 = perfcounter_get();
-                if(t_id==0)
-                    ins_calculate += (end2 - begin2);
+                // uint32_t end2 = perfcounter_get();
+                // if(t_id==0)
+                //     ins_calculate += (end2 - begin2);
             }
         }
         // for(int m = 0; m< TOPK ; m++)
@@ -378,7 +378,7 @@ int main(){
         //         printf("i:%d q_o[i+1]:%d cur_I[%d]: %lld \n ",i,q_o[i+1], m,cur_I[m]);
         //     }
         // }
-        uint32_t begin = perfcounter_get();
+        // uint32_t begin = perfcounter_get();
         int temp_size = temp_result.size;
         convertMaxHeapToMinHeap(&temp_result);
         for(int j=temp_size;j>0;--j)
@@ -390,9 +390,9 @@ int main(){
             push(&result, max_r.fir, max_r.sed);
             sem_give(&result_sem);
         }
-        uint32_t end = perfcounter_get();
-        if(t_id==0)
-            ins_total_topk += (end - begin);
+        // uint32_t end = perfcounter_get();
+        // if(t_id==0)
+        //     ins_total_topk += (end - begin);
         //写回当前query 的结果回结果数组
         // printf("i: %d tasklet id: %d cur_I[0]: %lld cur_dis[0]: %u \n",i,t_id,cur_I[0],cur_dis[0]);
         barrier_wait(&barrier_write);
@@ -415,16 +415,16 @@ int main(){
         }
         // barrier_wait(&barrier_write);
     }
-    if(t_id==0)
-        ins_main = perfcounter_get();
+    // if(t_id==0)
+    //     ins_main = perfcounter_get();
     // if(q_o[1]!=-1)
     // {
     //     printf("tasklet id: %d finish\n",t_id);
     // }
-    if(t_id==0)
-    {
-        printf("ins_main: %lu, ins_update: %lu, ins_insert:%lu, ins_calculate:%lu, ins_total_topk:%lu\n", ins_main,ins_update, ins_insert, ins_calculate,ins_total_topk);
-    }
+    // if(t_id==0)
+    // {
+    //     printf("ins_main: %lu, ins_update: %lu, ins_insert:%lu, ins_calculate:%lu, ins_total_topk:%lu, ins_memory_access:%u\n", ins_main,ins_update, ins_insert, ins_calculate,ins_total_topk,ins_memory_access);
+    // }
     return 0;
 }
 

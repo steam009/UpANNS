@@ -34,7 +34,7 @@
 #endif
 #define THREADSHOLD 1
 #define CACHE_LEN 4
-#define CACHE_PS_LEN 200
+#define CACHE_PS_LEN 256
 
 /**
  * @struct dpu_runtime
@@ -95,69 +95,6 @@ struct pair_hash {
         return hash1 ^ (hash2 << 1); // Combine the two hashes
     }
 };
-
-float* read_fbin(const std::string& filename, size_t& nvecs, size_t& dim, int start_idx = 0, int chunk_size = -1) {
-    std::ifstream file(filename, std::ios::binary);
-    assert(file.is_open());
-
-    int nvecs_h;
-    int dim_h;
-    file.read(reinterpret_cast<char*>(&nvecs_h), sizeof(int));
-    file.read(reinterpret_cast<char*>(&dim_h), sizeof(int));
-    nvecs = nvecs_h;
-    dim = dim_h;
-
-    nvecs = (nvecs - start_idx);
-    if (chunk_size != -1) {
-        nvecs = chunk_size;
-    }
-
-    // Allocate memory for the data
-    float* data = new float[nvecs * dim];
-
-    file.seekg(8 + start_idx * sizeof(float) * dim, std::ios::beg);
-    file.read(reinterpret_cast<char*>(data), nvecs * dim * sizeof(float));
-
-    return data;
-}
-
-int* read_ibin(const std::string& filename, size_t& nvecs, size_t& dim, int start_idx = 0, int chunk_size = -1) {
-    std::ifstream file(filename, std::ios::binary);
-    assert(file.is_open());
-
-    int nvecs_h;
-    int dim_h;
-    file.read(reinterpret_cast<char*>(&nvecs_h), sizeof(int));
-    file.read(reinterpret_cast<char*>(&dim_h), sizeof(int));
-    nvecs = nvecs_h;
-    dim = dim_h;
-
-    nvecs = (nvecs - start_idx);
-    if (chunk_size != -1) {
-        nvecs = chunk_size;
-    }
-
-    // Allocate memory for the data
-    int* data = new int[nvecs * dim];
-
-    file.seekg(8 + start_idx * sizeof(int) * dim, std::ios::beg);
-    file.read(reinterpret_cast<char*>(data), nvecs * dim * sizeof(int));
-
-    return data;
-}
-
-// Helper function to read integers from a binary file
-template<typename T>
-T readBinaryInt(std::ifstream& file) {
-    T value;
-    file.read(reinterpret_cast<char*>(&value), sizeof(T));
-    return value;
-}
-
-// Helper function to read data from a binary file into a buffer
-void readBinaryData(std::ifstream& file, void* buffer, size_t size) {
-    file.read(reinterpret_cast<char*>(buffer), size);
-}
 
 float* bvecs_read(const char* fname, int32_t* d_out, int32_t* n_out) {
     FILE* f = fopen(fname, "r");
@@ -275,7 +212,7 @@ int main() {
     // const char *index_key = "PQ32";
     // const char *index_key = "PCA80,Flat";
     // const char *index_key = "IVF4096,PQ8+16";
-    const char *index_key = "IVF4096,PQ12";
+    const char *index_key = "IVF4096,PQ32";
     // const char *index_key = "IMI2x8,PQ32";
     // const char *index_key = "IMI2x8,PQ8+16";
     // const char *index_key = "OPQ16_64,IMI2x8,PQ8+16";
@@ -284,14 +221,14 @@ int main() {
 
     printf("begin to load model: MAX STORE: %d \n", MAX_DPU_STORE_SIZE);
     // index = dynamic_cast<faiss::IndexIVFPQ*>(faiss::read_index("kmeans16.index"));
-    index = dynamic_cast<faiss::IndexIVFPQ*>(faiss::read_index("deep1B_4096PQ12.index"));
+    index = dynamic_cast<faiss::IndexIVFPQ*>(faiss::read_index("sift1B_4096PQ16.index"));
 
     uint32_t nr_of_dpus;
     // auto system = dpu::DpuSet::allocate(NR_DPUS);
     // system.load("/home/cst/PQ-try/dpu/search_dpu");
     nr_of_dpus = NR_DPUS;
 
-    int32_t d = 96;
+    int32_t d = 128;
 
     // printf("[%.3f s] Loading train set\n", elapsed() - t0);
 
@@ -328,11 +265,12 @@ int main() {
     // delete[] xb;
 
     faiss::ArrayInvertedLists *invlists = static_cast<faiss::ArrayInvertedLists*>(index->invlists);
+    std::vector<std::vector<uint8_t>> codes = invlists->codes; // size nlist * n
     std::vector<std::vector<faiss::idx_t>> ids = invlists->ids;// size nlist * n
     int32_t nlist = index->nlist;
     int32_t code_size = index->invlists->code_size;
 
-    std::vector<std::vector<uint8_t>> source = invlists->codes; // 假设这是你的源数据
+    std::vector<std::vector<uint8_t>> source = invlists->codes; 
     std::vector<std::vector<uint16_t>> new_codes(source.size());
 
     for (size_t i = 0; i < source.size(); ++i) {
@@ -346,6 +284,7 @@ int main() {
     }
     std::vector<std::vector<uint8_t>>().swap(source);
 
+
     //codebook : size M * ksub * dsub
     // Layout : (M, ksub, dsub)
     int32_t ksub = index->pq.ksub;
@@ -357,7 +296,7 @@ int main() {
     // std::vector<std::vector<int>> cluster_starting_addr(nlist, std::vector<int>(1, 0));
     // std::vector<std::vector<std::vector<bool> >> is_cached(nlist, std::vector<std::vector<bool> >(code_size, std::vector<bool>(KSUB, 0)));
     // for(int cur_c_id=0; cur_c_id< nlist; cur_c_id++){
-    //     std::string cache_name =  "./SPACE1B-cache-4/SPACE1B_20_"+ std::to_string(cur_c_id) + "__decay_0_sampling_50_alpha"+ "_50_length_"+std::to_string(CACHE_LEN)+"_hbm_1.0.hbm.cluster";
+    //     std::string cache_name =  "./sift1B16-cache/centroid16_"+ std::to_string(cur_c_id) + "__decay_0_sampling_50_alpha"+ "_50_length_"+std::to_string(CACHE_LEN)+"_hbm_1.0.hbm.cluster";
     //     std::ifstream hbm_graphfile(cache_name);
     //     std::string line;
     //     int nr_of_line=CACHE_PS_LEN;
@@ -544,8 +483,8 @@ int main() {
     //         }
     //         tmp_codes[0] = new_len * 2;
     //         // tmp_codes[0] |= (no_cache_len-1);
-    //         // new_tmp_codes.push_back((uint16_t)new_len);
-    //         if(new_len > 20)
+    //         new_tmp_codes.push_back((uint16_t)(new_len - 1));
+    //         if(new_len > 16)
     //         {
     //             printf("some error, new len larger than MS \n");
     //         }
@@ -564,7 +503,7 @@ int main() {
     //         }
     //         for(int k = 0; k < CODE_SIZE; k++)
     //         {
-    //             if(k < new_len)
+    //             if(k < new_len + 1)
     //                 new_codes[i].push_back(new_tmp_codes[k]);
     //             else
     //                 new_codes[i].push_back(base_adr);//其实可以压缩，但是没想好！！！
@@ -601,10 +540,6 @@ int main() {
     //         //     }
     //         // }
     //     }
-    //     std::vector<uint8_t>().swap(codes[i]);
-    //     std::unordered_map<uint16_t, int>().swap(original_item_to_cacheline[i]);
-    //     std::vector<int>().swap(cluster_starting_addr[i]);
-    //     std::vector<std::vector<bool> >().swap(is_cached[i]);
     // }
     // std::vector<std::vector<uint8_t>>().swap(codes);
     // std::vector<std::unordered_map<uint16_t, int>>().swap(original_item_to_cacheline);
@@ -619,7 +554,7 @@ int main() {
         float temp = (index->pq.centroids[i]);
         max_codebook = MAX(temp, max_codebook);
         min_codebook = MIN(temp, min_codebook);
-        codebook[i] = (int8_t)(temp*100);//应该用量化的方法，后面改
+        codebook[i] = (int8_t)temp;//应该用量化的方法，后面改
     }
 
     printf("max codebook: %f, min codebook: %f\n", max_codebook, min_codebook);
@@ -627,118 +562,44 @@ int main() {
     //传输encoded point 到相应的DPU
     int32_t nr_centroids = nlist / nr_of_dpus; // number of controids that one DPU need to store.
     std::vector<int32_t> Cp(nlist,0); // number of points in each centroid.
-    std::vector<int32_t> nr_of_copy(nlist,0);
-    std::unordered_map<int32_t, std::vector<int32_t> > copy_map;
-    std::unordered_map<int32_t, int32_t> map_copy;
     int32_t avg_cp = 0;
     for(int32_t i = 0;i<nlist;i++)
     {
         Cp[i] = ids[i].size();
-        if(Cp[i] > MAX_DPU_STORE_SIZE * 0.8)
-        {
-            int nr_c = (Cp[i] + MAX_DPU_STORE_SIZE * 0.8 - 1) / (MAX_DPU_STORE_SIZE * 0.8);
-            int each_size = Cp[i] / nr_c;
-            int last_size = Cp[i] - each_size*(nr_c - 1);
-            Cp[i] = each_size;
-            for(int m=1; m < nr_c-1; m++)
-            {
-                Cp.push_back(each_size);
-                copy_map[i].push_back(Cp.size()-1);
-                map_copy[Cp.size()-1] = i;
-                std::vector<faiss::idx_t> temp2_ids;
-                std::vector<uint16_t> temp2_codes;
-                for(int k=m*each_size; k<(m+1)*each_size; k++)
-                {
-                    temp2_ids.push_back(ids[i][k]);
-                    for(int m=0; m<code_size; m++)
-                    {
-                        temp2_codes.push_back(new_codes[i][k*code_size + m]);
-                    }
-                }
-                ids.push_back(temp2_ids);
-                new_codes.push_back(temp2_codes);
-            }
-            Cp.push_back(last_size);
-            copy_map[i].push_back(Cp.size()-1);
-            map_copy[Cp.size()-1] = i;
-            std::vector<faiss::idx_t> temp_ids;
-            std::vector<uint16_t> temp_codes;
-            for(int k=each_size; k<ids[i].size(); k++)
-            {
-                temp_ids.push_back(ids[i][k]);
-                for(int m=0; m<code_size; m++)
-                {
-                    temp_codes.push_back(new_codes[i][k*code_size + m]);
-                }
-            }
-            ids.push_back(temp_ids);
-            new_codes.push_back(temp_codes);
-        }
-        avg_cp += ids[i].size();
+        avg_cp += Cp[i];
     }
     avg_cp = avg_cp / nlist;//average points in each centroid.
 
-    // int32_t nq=10000;
-    // float* xq;
-
-    // {
-    //     printf("[%.3f s] Loading queries\n", elapsed() - t0);
-
-    //     int32_t d2;
-    //     xq = bvecs_read("./sift1B/bigann_query.bvecs", &d2, &nq);
-    //     // xq = fvecs_read("./sift1M/sift_query.fvecs", &d2, &nq);
-    //     assert(d == d2 || !"query does not have same dimension as train set");
-    // }
-
-    // int32_t ks;         // nb of results per query in the GT
-    // faiss::idx_t* gt; // nq * k matrix of ground-truth nearest-neighbors
-
-    // printf("[%.3f s] Loading ground truth for %ld queries\n",
-    //         elapsed() - t0,
-    //         nq);
-
-    // // load ground-truth and convert int to long
-    // int32_t nq2;
-    // int* gt_int = ivecs_read("./sift1B/idx_1000M.ivecs", &ks, &nq2);
-    // // int* gt_int = ivecs_read("./sift1M/sift_groundtruth.ivecs", &ks, &nq2);
-    // assert(nq2 == nq || !"incorrect nb of ground truth entries");
-
-    // gt = new faiss::idx_t[ks * nq];
-    // for (int i = 0; i < ks * nq; i++) {
-    //     gt[i] = gt_int[i];
-    // }
-    // delete[] gt_int;
-
-    size_t nq;
+    int32_t nq;
     float* xq;
 
     {
         printf("[%.3f s] Loading queries\n", elapsed() - t0);
 
-        size_t d2;
-        xq = read_fbin("./deep/query.public.10K.fbin", nq, d2);
+        int32_t d2;
+        xq = bvecs_read("./sift1B/bigann_query.bvecs", &d2, &nq);
+        // xq = fvecs_read("./sift1M/sift_query.fvecs", &d2, &nq);
         assert(d == d2 || !"query does not have same dimension as train set");
     }
 
-    size_t ks;         // nb of results per query in the GT
+    int32_t ks;         // nb of results per query in the GT
     faiss::idx_t* gt; // nq * k matrix of ground-truth nearest-neighbors
 
-    {
-        printf("[%.3f s] Loading ground truth for %ld queries\n",
+    printf("[%.3f s] Loading ground truth for %ld queries\n",
             elapsed() - t0,
             nq);
 
-        // load ground-truth and convert int to long
-        size_t nq2;
-        int* gt_int = read_ibin("./deep/groundtruth.public.10K.ibin", nq2, ks);
-        assert(nq2 == nq || !"incorrect nb of ground truth entries");
+    // load ground-truth and convert int to long
+    int32_t nq2;
+    int* gt_int = ivecs_read("./sift1B/idx_1000M.ivecs", &ks, &nq2);
+    // int* gt_int = ivecs_read("./sift1M/sift_groundtruth.ivecs", &ks, &nq2);
+    assert(nq2 == nq || !"incorrect nb of ground truth entries");
 
-        gt = new faiss::idx_t[ks * nq];
-        for (int i = 0; i < ks * nq; i++) {
-            gt[i] = gt_int[i];
-        }
-        delete[] gt_int;
+    gt = new faiss::idx_t[ks * nq];
+    for (int i = 0; i < ks * nq; i++) {
+        gt[i] = gt_int[i];
     }
+    delete[] gt_int;
 
     int32_t nq_test = nq / 10 ;
     nq_test = BS;
@@ -756,73 +617,15 @@ int main() {
     params.set_index_parameters(index, set_nprobs.c_str());
     int32_t nprobe = NPROBS;
     faiss::idx_t* idx = new faiss::idx_t[nq_freq * nprobe];
-    faiss::idx_t* idx_q_m = new faiss::idx_t[nq_freq * nprobe];
     float* coarse_dis = new float[nq_freq * nprobe];
     index->quantizer->search(nq_freq,xq_freq,nprobe,coarse_dis,idx,nullptr);
     delete[] xq_freq;
-    // //統計idx的頻率
-    // std::vector<int32_t> Fq(nlist,0); // access frequency for each centroid.
-    // for(int32_t i = 0; i < nq_freq*nprobe;i++)
-    // {
-    //     Fq[idx[i]]++;
-    // }
-    std::vector<float> reduce_ratio(nlist, 0);
-    std::ifstream infile("cache_deep1B4096PQ12cache6size64_0.05.txt");
-    if (!infile) {
-        std::cerr << "Unable to open file";
-        return 1;
-    }
-    std::string line;
-    while (std::getline(infile, line)) {
-        std::istringstream iss(line);
-        std::string token;
-        int c_id;
-        float ratio;
-
-        // Extract c_id
-        std::getline(iss, token, ':');
-        std::getline(iss, token, ',');
-        c_id = std::stoi(token);
-
-        // Skip reduce_len
-        std::getline(iss, token, ':');
-        std::getline(iss, token, ',');
-
-        // Extract ratio
-        std::getline(iss, token, ':');
-        std::getline(iss, token, ',');
-        ratio = std::stof(token);
-
-        reduce_ratio[c_id] = ratio;
-        if(ratio >= 1)
-        {
-            printf("error: ratio >= 1\n");
-        }
-    }
-    infile.close();
-
-    //将reduce_ratio 降序排序
-    std::vector<std::pair<float, int>> reduce_ratio_idx;
-    for (int32_t i = 0; i < nlist; ++i) {
-        reduce_ratio_idx.push_back(std::make_pair(reduce_ratio[i], i));
-    }
-    std::sort(reduce_ratio_idx.begin(), reduce_ratio_idx.end(), comparefloatab);
-
     //統計idx的頻率
-    std::vector<int32_t> Fq(nlist,0); // access frequency for each centroid.Fq[idx[i]]++;
-    float avg_reduce_ratio = 0;
-    for(int32_t i = 0; i < nq_freq*nprobe;i+=nprobe)
+    std::vector<int32_t> Fq(nlist,0); // access frequency for each centroid.
+    for(int32_t i = 0; i < nq_freq*nprobe;i++)
     {
-        for(int32_t j = 0; j < nprobe; j++)
-        {
-            Fq[reduce_ratio_idx[j].second]++;
-            avg_reduce_ratio += reduce_ratio_idx[j].first;
-            idx_q_m[i+j] = reduce_ratio_idx[j].second;
-        }
+        Fq[idx[i]]++;
     }
-    printf("before avg_reduce_ratio: %f\n", avg_reduce_ratio);
-    avg_reduce_ratio = avg_reduce_ratio / ((float)nq_freq*nprobe);
-    printf("avg_reduce_ratio: %f\n", avg_reduce_ratio);
     delete[] idx;
     delete[] coarse_dis;
     int32_t avg_fq = 0;
@@ -838,26 +641,20 @@ int main() {
     int32_t LUT_process = d * 256 * 8; // update_LUT的计算量，因为有乘法和没有乘法速度差了5x，所以*5
     int32_t avg_Centroids = (nq_freq * nprobe) / (nr_of_dpus); // 平均每个DPU需要计算的 centroid 的个数
 
-    std::vector<int32_t> C_process(Cp.size(),0);
-    for(int i=0;i<Cp.size();i++)
+    std::vector<int32_t> C_process(nlist,0);
+    for(int i=0;i<nlist;i++)
     {
-        if(i < nlist){
-            C_process[i] = Fq[i] * Cp[i] ;
-        }
-        else
-        {
-            C_process[i] = Fq[map_copy[i]] * Cp[i] ;
-        }
-        avg_ps += (std::ceil(static_cast<double>(C_process[i]) / nr_of_dpus));
+        C_process[i] = Fq[i] * Cp[i] ;
+        avg_ps += C_process[i];
     }
-    avg_process = avg_ps;
+    avg_process = std::ceil(static_cast<double>(avg_ps) / nr_of_dpus);
     printf("[%.6f s] avg_process: %d\n",
             elapsed() - t0,
             avg_process);
 
     //获取 C_process 降序排序的索引
     std::vector<std::pair<int, int>> C_process_idx;
-    for (int32_t i = 0; i < Cp.size(); ++i) {
+    for (int32_t i = 0; i < nlist; ++i) {
         C_process_idx.push_back(std::make_pair(C_process[i], i));
     }
     std::sort(C_process_idx.begin(), C_process_idx.end(), compareab);
@@ -898,12 +695,12 @@ int main() {
     std::vector<std::vector<float>>().swap(C_dis);
 
     //记录centroid是否已经分配
-    std::vector<int8_t> visit(Cp.size(),0);
+    std::vector<int8_t> visit(nlist,0);
     //记录每个 DPU 存的 centroid 的编号
     std::vector<std::vector<int32_t> > dpu_id(nr_of_dpus);
     std::vector<std::vector<Code_pair>> dpu_hbm_cached_ps(nr_of_dpus);
     std::vector<int32_t> dpu_size(nr_of_dpus,0); // 记录每个DPU含有encoded point 个数
-    std::vector<std::vector<int32_t> > C_dpu(Cp.size());//记录每个centroid分配到的DPU id
+    std::vector<std::vector<int32_t> > C_dpu(nlist);//记录每个centroid分配到的DPU id
     std::vector<std::vector<int64_t> > dpu_store_ids(nr_of_dpus);//每个DPU 存的 ids
     std::vector<std::vector<uint16_t> > dpu_store_code(nr_of_dpus);//每个DPU 存的 encoded points
     std::vector<std::vector<int32_t> > dpu_store_offset(nr_of_dpus);// 每个DPU 存的 centroid 集合的 offset
@@ -928,7 +725,7 @@ int main() {
             visit[C_process_idx[begin].second] = 1;
             begin++;
         }
-        if(begin == Cp.size())
+        if(begin == nlist)
             continue;
         visit[C_process_idx[begin].second] = 1;
         int32_t C_id = C_process_idx[begin].second;
@@ -936,7 +733,7 @@ int main() {
         int dpu_offsets = dpu_store_offset[i][dpu_store_offset[i].size()-1];
         int j = i;
         bool unsuitable_dpu = false;
-        if(C_process[C_id] > avg_process * 1.10)
+        if(C_process[C_id] > avg_process * 1)
         {
             int cnr_of_dpu = (C_process[C_id] + avg_process - 1) / avg_process; // 该centroid 应该分配到多个DPU
             int per_process = C_process[C_id] / cnr_of_dpu;
@@ -1057,8 +854,6 @@ int main() {
 
         while(each_dpu_process[j] < avg_process)
         {
-            if(C_id >= nlist)
-                break;
             if(visit[C_dis_sorted_indices[C_id][dis_id]]!=0 || C_process[C_dis_sorted_indices[C_id][dis_id]] == 0)
             {
                 dis_id++;
@@ -1101,27 +896,21 @@ int main() {
             std::vector<faiss::idx_t>().swap(ids[next_id]);
         }
     }
-    for(int begin=0; begin<Cp.size(); begin++)// 以DPU_STORE_SIZE为重点,找到最合适的DPU
+    for(int begin=0; begin<nlist; begin++)// 以DPU_STORE_SIZE为重点,找到最合适的DPU
     {
         if(visit[begin]==1)
             continue;
         visit[begin] = 1;
         int32_t C_id = begin;
         std::vector<std::pair<int, int>> Dpu_proc_idx;
-        int32_t min_dpu_store = 99999999;
         for(int i=0; i< nr_of_dpus; i++)
         {
-            min_dpu_store = std::min(min_dpu_store, dpu_store_offset[i][dpu_store_offset[i].size()-1]);
             if(dpu_store_offset[i][dpu_store_offset[i].size()-1]+Cp[C_id] < MAX_DPU_STORE_SIZE)
             {
                 Dpu_proc_idx.push_back(std::make_pair(each_dpu_process[i], i));
             }
         }
         std::sort(Dpu_proc_idx.begin(), Dpu_proc_idx.end(), comparebaINT);
-        if(Dpu_proc_idx.size()==0)
-        {
-            printf("min_dpu_store size = %d , Cp[%d] = :%d\n",min_dpu_store, C_id, Cp[C_id]);
-        }
         int D_id = Dpu_proc_idx[0].second;
         int dpu_offsets = dpu_store_offset[D_id][dpu_store_offset[D_id].size()-1];
         each_dpu_process[D_id] += C_process[C_id];
@@ -1215,7 +1004,7 @@ int main() {
     std::vector<std::vector<faiss::idx_t>>().swap(ids);
     std::vector<std::vector<uint16_t>>().swap(new_codes);
 
-    for(int i=0 ;i< Cp.size();i++)
+    for(int i=0 ;i< nlist;i++)
     {
         if(visit[i]==false)
             printf("some error!!! centroid %d not allocate. \n",i);
@@ -1242,13 +1031,6 @@ int main() {
     }
     printf("max dpu_proc %d : %d \n", max_did, max_dproc);
     printf("min dpu_proc %d : %d \n", min_did, min_dproc);
-    float avg_reduce_rate = 0;
-    for(int i=0; i < dpu_id[max_did].size(); i++)
-    {
-        avg_reduce_rate += reduce_ratio[dpu_id[max_did][i]];
-    }
-    avg_reduce_rate = avg_reduce_rate / dpu_id[max_did].size();
-    printf("max dpu avg reduce rate: %f\n", avg_reduce_rate);
     // printf("cache code rate: %f\n", (float)((float)cache_hit / 1000000000));
     // printf("cache code rate total: %f\n", (float)((float)cache_hit_total / 1000000000));
 
@@ -1331,7 +1113,6 @@ int main() {
     for (const auto& vec : dpu_store_ids) {
         max_size = std::max(max_size, vec.size());
     }
-    max_size = ALIGN(max_size,8);
     for (auto& vec : dpu_store_ids) {
         vec.resize(max_size, 0);
     }
@@ -1339,7 +1120,6 @@ int main() {
     for (const auto& vec : dpu_store_code) {
         max_size = std::max(max_size, vec.size());
     }
-    max_size = ALIGN(max_size,8);
     for (auto& vec : dpu_store_code) {
         vec.resize(max_size, 0);
     }
@@ -1352,7 +1132,6 @@ int main() {
     for (const auto& vec : dpu_store_offset) {
         max_size = std::max(max_size, vec.size());
     }
-    max_size = ALIGN(max_size,8);
     for (auto& vec : dpu_store_offset) {
         vec.resize(max_size, 0);
     }
@@ -1363,20 +1142,19 @@ int main() {
     for (const auto& vec : dpu_id) {
         max_size = std::max(max_size, vec.size());
     }
-    max_size = ALIGN(max_size,8);
     for (auto& vec : dpu_id) {
         vec.resize(max_size, 0);
     }
     system.copy("centroid_id",dpu_id);
 
-    //传输每个DPU 存的 cache
-    max_size = 0;
-    for (const auto& vec : dpu_hbm_cached_ps) {
-        max_size = std::max(max_size, vec.size());
-    }
-    Code_pair flat;
-    flat.fir = 0;
-    flat.sed = 0;
+    // //传输每个DPU 存的 cache
+    // max_size = 0;
+    // for (const auto& vec : dpu_hbm_cached_ps) {
+    //     max_size = std::max(max_size, vec.size());
+    // }
+    // Code_pair flat;
+    // flat.fir = 0;
+    // flat.sed = 0;
     // for (auto& vec : dpu_hbm_cached_ps) {
     //     vec.resize(max_size, flat);
     // }
@@ -1405,10 +1183,6 @@ int main() {
     faiss::idx_t* idx_q = new faiss::idx_t[nq_test * nprobe];
     float* coarse_dis_q = new float[nq_test * nprobe];
     index->quantizer->search(nq_test,xq_tmp,nprobe,coarse_dis_q,idx_q,nullptr);
-    for(int i=0;i<nq_test*nprobe;i++)
-    {
-        idx_q[i] = idx_q_m[i];
-    }
 
     // q_c layer: [nq_test, nprobe, d]
     int32_t* q_c = new int32_t[d*nq_test*nprobe];
@@ -1422,7 +1196,7 @@ int main() {
     std::vector<std::vector<bool> > q_dpu(nq_test,std::vector<bool>(nr_of_dpus,false)); // 每个query 对应的dpu
     std::vector<std::vector<int> > I_dpu_offset(nq_test,std::vector<int>(nr_of_dpus, -1)); // 记录读取DPU结果的位置，避免后续重复读
     std::vector<int> dpu_res_offset(nr_of_dpus,0); // 记录DPU结果的偏移
-    std::vector<int32_t> C_dpu_idx(Cp.size(), 0);
+    std::vector<int32_t> C_dpu_idx(nlist, 0);
     for(int w = 0; w < nr_of_dpus; w++)
     {
         dpu_q_o[w].push_back(0);
@@ -1439,33 +1213,10 @@ int main() {
             q_dpu[i][C_dpu[idx_q[i*nprobe+j]][C_dpu_idx[idx_q[i*nprobe+j]]]] = true;
             for(int k=0;k<d;k++)
             {
-                int8_t pow_q_c = (int8_t)((xq_tmp[i*d+k] - centroid_q[k])*100);
+                int8_t pow_q_c = (int8_t)((xq_tmp[i*d+k] - centroid_q[k]));
                 dpu_q_c[C_dpu[idx_q[i*nprobe+j]][C_dpu_idx[idx_q[i*nprobe+j]]]].push_back(pow_q_c);
             }
-            // dpu_q_c[C_dpu[idx_q[i*nprobe+j]][C_dpu_idx[idx_q[i*nprobe+j]]]].push_back(0);
-            // dpu_q_c[C_dpu[idx_q[i*nprobe+j]][C_dpu_idx[idx_q[i*nprobe+j]]]].push_back(0);
-            // dpu_q_c[C_dpu[idx_q[i*nprobe+j]][C_dpu_idx[idx_q[i*nprobe+j]]]].push_back(0);
-            // dpu_q_c[C_dpu[idx_q[i*nprobe+j]][C_dpu_idx[idx_q[i*nprobe+j]]]].push_back(0);
             C_dpu_idx[idx_q[i*nprobe+j]] = (C_dpu_idx[idx_q[i*nprobe+j]] +1 ) % C_dpu[idx_q[i*nprobe+j]].size();
-            if(copy_map.find(idx_q[i*nprobe+j])!=copy_map.end())
-            {
-                for(int m=0; m<copy_map[idx_q[i*nprobe+j]].size();m++){
-                    int new_dpu = copy_map[idx_q[i*nprobe+j]][m];
-                    dpu_qCentroid[C_dpu[new_dpu][C_dpu_idx[new_dpu]]].push_back(new_dpu);
-                    dpu_probe_num[C_dpu[new_dpu][C_dpu_idx[new_dpu]]]++;
-                    q_dpu[i][C_dpu[new_dpu][C_dpu_idx[new_dpu]]] = true;
-                    for(int k=0;k<d;k++)
-                    {
-                        int8_t pow_q_c = (int8_t)((xq_tmp[i*d+k] - centroid_q[k])*100);
-                        dpu_q_c[C_dpu[new_dpu][C_dpu_idx[new_dpu]]].push_back(pow_q_c);
-                    }
-                    // dpu_q_c[C_dpu[new_dpu][C_dpu_idx[new_dpu]]].push_back(0);
-                    // dpu_q_c[C_dpu[new_dpu][C_dpu_idx[new_dpu]]].push_back(0);
-                    // dpu_q_c[C_dpu[new_dpu][C_dpu_idx[new_dpu]]].push_back(0);
-                    // dpu_q_c[C_dpu[new_dpu][C_dpu_idx[new_dpu]]].push_back(0);
-                    C_dpu_idx[new_dpu] = (C_dpu_idx[new_dpu] +1 ) % C_dpu[new_dpu].size();
-                }
-            }
         }
         for(int w = 0; w < nr_of_dpus; w++)
         {
@@ -1515,7 +1266,6 @@ int main() {
     for (const auto& vec : dpu_q_c) {
         max_size = std::max(max_size, vec.size());
     }
-    max_size = ALIGN(max_size,8);
     for (auto& vec : dpu_q_c) {
         vec.resize(max_size, 0);
     }
@@ -1525,7 +1275,6 @@ int main() {
     for (const auto& vec : dpu_qCentroid) {
         max_size = std::max(max_size, vec.size());
     }
-    max_size = ALIGN(max_size,8);
     for (auto& vec : dpu_qCentroid) {
         vec.resize(max_size, 0);
     }
@@ -1536,7 +1285,6 @@ int main() {
     for (const auto& vec : dpu_q_o) {
         max_size = std::max(max_size, vec.size());
     }
-    max_size = ALIGN(max_size,8);
     for (auto& vec : dpu_q_o) {
         vec.resize(max_size, -1);
     }
@@ -1585,8 +1333,8 @@ int main() {
             elapsed() - t0,
             (t4-t3)*1000);
 
-    // system.dpus()[202]->log(std::cout);
-    system.log(std::cout);
+    system.dpus()[430]->log(std::cout);
+    // system.log(std::cout);
 
     // {
     // std::ofstream outfile("I_dpu_offsetVector.txt");
@@ -1697,7 +1445,7 @@ int main() {
     // evaluate result by hand.
     int n_1 = 0, n_10 = 0, n_100 = 0;
     for (int i = nq_freq+begin_idx; i < nq; i++) {
-        int gt_nn = gt[i * 100];
+        int gt_nn = gt[i * 1000];
         for (int j = 0; j < ks; j++) {
             if (I[(i-nq_freq - begin_idx) * ks + j] == gt_nn) {
                 if (j < 1)

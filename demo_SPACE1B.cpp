@@ -10,6 +10,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cstdint>
+#include <iostream>
+#include <fstream>
+#include <vector>
 
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -30,6 +34,20 @@
  *
  * and unzip it to the sudirectory sift1M.
  **/
+
+
+// Helper function to read integers from a binary file
+template<typename T>
+T readBinaryInt(std::ifstream& file) {
+    T value;
+    file.read(reinterpret_cast<char*>(&value), sizeof(T));
+    return value;
+}
+
+// Helper function to read data from a binary file into a buffer
+void readBinaryData(std::ifstream& file, void* buffer, size_t size) {
+    file.read(reinterpret_cast<char*>(buffer), size);
+}
 
 /*****************************************************
  * I/O functions for fvecs and ivecs
@@ -122,89 +140,56 @@ int main() {
     // const char *index_key = "PQ32";
     // const char *index_key = "PCA80,Flat";
     // const char *index_key = "IVF4096,PQ8+16";
-    const char *index_key = "IVF4096,PQ16";
+    const char *index_key = "IVF4096,PQ20";
     // const char *index_key = "IMI2x8,PQ32";
     // const char *index_key = "IMI2x8,PQ8+16";
     // const char *index_key = "OPQ16_64,IMI2x8,PQ8+16";
 
     faiss::IndexIVFPQ* index;
 
-    index = dynamic_cast<faiss::IndexIVFPQ*>(faiss::read_index("sift1B_8192PQ16.index"));
+    index = dynamic_cast<faiss::IndexIVFPQ*>(faiss::read_index("SPACE1B_4096PQ20.index"));
 
-    size_t d = 128;
+    size_t d = 100;
 
-    // {
-    //     printf("[%.3f s] Loading train set\n", elapsed() - t0);
+    size_t vec_count, vec_dimension;
+    const size_t part_size = 1048576; // 1MB
+    int part_count = 0;
 
-    //     size_t nt;
-    //     float* xt = bvecs_read("../sift1B/bigann_learn.bvecs", &d, &nt);
+    // Read query file
+    std::ifstream fq("./SPACE1B/query.bin", std::ios::binary);
+    int q_count = readBinaryInt<int>(fq);
+    int q_dimension = readBinaryInt<int>(fq);
+    printf("[%.3f s] q_count: %d  q_dimension: %d\n", elapsed() - t0, q_count, q_dimension);
+    int8_t* queries = new int8_t[q_count * q_dimension];
+    readBinaryData(fq, queries, q_count * q_dimension * sizeof(int8_t));
+    fq.close();
 
-    //     printf("[%.3f s] Preparing index \"%s\" d=%ld\n",
-    //            elapsed() - t0,
-    //            index_key,
-    //            d);
-    //     index = static_cast<faiss::IndexIVFPQ *>(faiss::index_factory(d, index_key, faiss::METRIC_L2));
+    // Read truth file
+    std::ifstream ftruth("./SPACE1B/truth.bin", std::ios::binary);
+    int t_count = readBinaryInt<int>(ftruth);
+    int topk = readBinaryInt<int>(ftruth);
+    printf("[%.3f s] t_count: %d  topk: %d\n", elapsed() - t0, t_count, topk);
+    int32_t* truth_vids = new int32_t[t_count * topk];
+    float* truth_distances = new float[t_count * topk];
+    readBinaryData(ftruth, truth_vids, t_count * topk * sizeof(int32_t));
+    readBinaryData(ftruth, truth_distances, t_count * topk * sizeof(float));
+    ftruth.close();
 
-    //     printf("[%.3f s] Training on %ld vectors\n", elapsed() - t0, nt);
-
-    //     index->train(nt, xt);
-    //     delete[] xt;
-    // }
-
-    // {
-    //     printf("[%.3f s] Loading database\n", elapsed() - t0);
-
-    //     size_t nb, d2;
-    //     float* xb = bvecs_read("../sift1B/bigann_base.bvecs", &d2, &nb);
-    //     assert(d == d2 || !"dataset does not have same dimension as train set");
-
-    //     printf("[%.3f s] Indexing database, size %ld*%ld\n",
-    //            elapsed() - t0,
-    //            nb,
-    //            d);
-    //     nb = 500000000;
-
-    //     index->add(nb, xb);
-    //     faiss::write_index(index, "sift500M_4096PQ16.index");
-
-    //     float* prec = index->precomputed_table.data();/// size nlist * pq.M * pq.ksub
-    //     size_t num = index->precomputed_table.size();
-    //     printf("show pre table: %d \n", num);
-
-
-    //     delete[] xb;
-    // }
-
+    printf("[%.3f s] Loading queries\n", elapsed() - t0);
     size_t nq;
-    float* xq;
-
-    {
-        printf("[%.3f s] Loading queries\n", elapsed() - t0);
-
-        size_t d2;
-        xq = bvecs_read("./sift1B/bigann_query.bvecs", &d2, &nq);
-        assert(d == d2 || !"query does not have same dimension as train set");
+    float* xq = new float[q_count * q_dimension];
+    for (int i = 0; i < q_count * q_dimension; ++i) {
+        xq[i] = static_cast<float>(queries[i]);
     }
+    delete[] queries;
 
-    size_t k;         // nb of results per query in the GT
-    faiss::idx_t* gt; // nq * k matrix of ground-truth nearest-neighbors
-
-    {
-        printf("[%.3f s] Loading ground truth for %ld queries\n",
-               elapsed() - t0,
-               nq);
-
-        // load ground-truth and convert int to long
-        size_t nq2;
-        int* gt_int = ivecs_read("./sift1B/idx_1000M.ivecs", &k, &nq2);
-        assert(nq2 == nq || !"incorrect nb of ground truth entries");
-
-        gt = new faiss::idx_t[k * nq];
-        for (int i = 0; i < k * nq; i++) {
-            gt[i] = gt_int[i];
-        }
-        delete[] gt_int;
+    size_t k = topk;         // nb of results per query in the GT
+    faiss::idx_t* gt = new faiss::idx_t[t_count * topk]; // nq * k matrix of ground-truth nearest-neighbors
+    for (int i = 0; i < t_count * topk; ++i) {
+        gt[i] = static_cast<faiss::idx_t>(truth_vids[i]);
     }
+    delete[] truth_vids;
+    delete[] truth_distances;
 
     // Result of the auto-tuning
     std::string selected_params;
@@ -262,15 +247,16 @@ int main() {
         std::string set_nprobs = "nprobe=" + std::to_string(NPROBS);
         params.set_index_parameters(index, set_nprobs.c_str());
 
-        nq = 1000;
-        float* xq_tmp = new float[128*nq];
-        for(int i=0;i<128*(nq);i++)
+        nq = BS;
+        float* xq_tmp = new float[100*nq];
+        for(int i=0;i<100*(nq);i++)
         {
-            xq_tmp[i] = xq[i+128*9000];
+            xq_tmp[i] = xq[i + 100*9000];
         }
         printf("[%.6f s] Perform a search on %ld queries\n",
                elapsed() - t0,
                nq);
+
         double begin_time = elapsed();
 
         k = TOPK;
@@ -279,6 +265,7 @@ int main() {
         float* D = new float[nq * k];
 
         index->search(nq, xq_tmp, k, D, I);
+
         double end_time = elapsed() - begin_time;
 
         printf("[%.6f s] Compute recalls, time:%.6f\n", elapsed() - t0, end_time);
@@ -286,7 +273,7 @@ int main() {
         // evaluate result by hand.
         int n_1 = 0, n_10 = 0, n_100 = 0;
         for (int i = 0; i < nq; i++) {
-            int gt_nn = gt[(i+9000) * 1000];
+            int gt_nn = gt[i * 100 + 9000*100];
             for (int j = 0; j < k; j++) {
                 if (I[i * k + j] == gt_nn) {
                     if (j < 1)
