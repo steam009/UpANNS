@@ -22,7 +22,8 @@ DIMM                ?= 128
 MAX_DPU_ID          ?= 8
 CODEBOOK_SIZE       ?= 4096
 ETD                 ?= 16
-NPROBS              ?= 32
+NPROBS              ?= 64
+BS                  ?= 1000
 
 
 
@@ -101,6 +102,7 @@ CFLAGS              += $(COMMON_CFLAGS) \
                        -DNR_TASKLETS=$(NR_TASKLETS) \
                        -DETD=$(ETD) \
                        -DNPROBS=$(NPROBS) \
+                       -DBS=$(BS) \
 					   
 
 # define SHOW_DPU_LOGS in the source if we want DPU logs
@@ -173,6 +175,7 @@ export MAX_DPU_ID
 export CODEBOOK_SIZE
 export ETD
 export NPROBS
+export BS
 
 dpu:
 	$(SHOW_MAKE) $@

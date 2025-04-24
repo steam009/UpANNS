@@ -259,8 +259,7 @@ int main() {
                selected_params.c_str());
 
         // params.set_index_parameters(index, selected_params.c_str());
-        std::string set_nprobs = "nprobe=" + std::to_string(NPROBS);
-        params.set_index_parameters(index, set_nprobs.c_str());
+        params.set_index_parameters(index, "nprobe=32");
 
         nq = 1000;
         float* xq_tmp = new float[128*nq];
@@ -271,17 +270,15 @@ int main() {
         printf("[%.6f s] Perform a search on %ld queries\n",
                elapsed() - t0,
                nq);
-        double begin_time = elapsed();
 
-        k = TOPK;
+        k = 1000;
         // output buffers
         faiss::idx_t* I = new faiss::idx_t[nq * k];
         float* D = new float[nq * k];
 
         index->search(nq, xq_tmp, k, D, I);
-        double end_time = elapsed() - begin_time;
 
-        printf("[%.6f s] Compute recalls, time:%.6f\n", elapsed() - t0, end_time);
+        printf("[%.6f s] Compute recalls\n", elapsed() - t0);
 
         // evaluate result by hand.
         int n_1 = 0, n_10 = 0, n_100 = 0;

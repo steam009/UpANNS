@@ -60,7 +60,6 @@ CFLAGS              += $(COMMON_CFLAGS) \
                        -DNR_DPUS=$(NR_DPUS) \
                        -DNR_TASKLETS=$(NR_TASKLETS) \
                        -DETD=$(ETD) \
-                       -DNPROBS=$(NPROBS) \
 
 
 # Silence make

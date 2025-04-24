@@ -33,8 +33,8 @@
 #    define DPU_BINARY "/home/cst/PQ-try/dpu/search_dpu" // Relative path regarding the PyTorch code
 #endif
 #define THREADSHOLD 1
-#define CACHE_LEN 7
-#define CACHE_PS_LEN 32
+#define CACHE_LEN 4
+#define CACHE_PS_LEN 200
 
 /**
  * @struct dpu_runtime
@@ -95,6 +95,19 @@ struct pair_hash {
         return hash1 ^ (hash2 << 1); // Combine the two hashes
     }
 };
+
+// Helper function to read integers from a binary file
+template<typename T>
+T readBinaryInt(std::ifstream& file) {
+    T value;
+    file.read(reinterpret_cast<char*>(&value), sizeof(T));
+    return value;
+}
+
+// Helper function to read data from a binary file into a buffer
+void readBinaryData(std::ifstream& file, void* buffer, size_t size) {
+    file.read(reinterpret_cast<char*>(buffer), size);
+}
 
 float* bvecs_read(const char* fname, int32_t* d_out, int32_t* n_out) {
     FILE* f = fopen(fname, "r");
@@ -221,14 +234,14 @@ int main() {
 
     printf("begin to load model: MAX STORE: %d \n", MAX_DPU_STORE_SIZE);
     // index = dynamic_cast<faiss::IndexIVFPQ*>(faiss::read_index("kmeans16.index"));
-    index = dynamic_cast<faiss::IndexIVFPQ*>(faiss::read_index("sift1B_4096PQ16.index"));
+    index = dynamic_cast<faiss::IndexIVFPQ*>(faiss::read_index("SPACE1B_4096PQ20.index"));
 
     uint32_t nr_of_dpus;
     // auto system = dpu::DpuSet::allocate(NR_DPUS);
     // system.load("/home/cst/PQ-try/dpu/search_dpu");
     nr_of_dpus = NR_DPUS;
 
-    int32_t d = 128;
+    int32_t d = 100;
 
     // printf("[%.3f s] Loading train set\n", elapsed() - t0);
 
@@ -265,10 +278,23 @@ int main() {
     // delete[] xb;
 
     faiss::ArrayInvertedLists *invlists = static_cast<faiss::ArrayInvertedLists*>(index->invlists);
-    std::vector<std::vector<uint8_t>> codes = invlists->codes; // size nlist * n
     std::vector<std::vector<faiss::idx_t>> ids = invlists->ids;// size nlist * n
     int32_t nlist = index->nlist;
     int32_t code_size = index->invlists->code_size;
+
+    std::vector<std::vector<uint8_t>> source = invlists->codes; // 假设这是你的源数据
+    std::vector<std::vector<uint16_t>> new_codes(source.size());
+
+    for (size_t i = 0; i < source.size(); ++i) {
+        new_codes[i].resize(source[i].size());
+        for (size_t j = 0; j < ids[i].size(); ++j) {
+            for(size_t k=0; k< code_size; k++)
+            {
+                new_codes[i][j*code_size + k] = static_cast<uint16_t>(source[i][j*code_size + k]) + k * KSUB; // 转换每个元素
+            }
+        }
+    }
+    std::vector<std::vector<uint8_t>>().swap(source);
 
     //codebook : size M * ksub * dsub
     // Layout : (M, ksub, dsub)
@@ -276,286 +302,264 @@ int main() {
     int32_t dsub = index->pq.dsub;
     int32_t M = index->pq.M; 
 
-    std::vector<std::vector<std::vector<Code_pair>>> hbm_cached_ps(nlist);
-    std::vector<std::unordered_map<uint16_t, int>> original_item_to_cacheline(nlist);
-    std::vector<std::vector<int>> cluster_starting_addr(nlist, std::vector<int>(1, 0));
-    std::vector<std::vector<std::vector<bool> >> is_cached(nlist, std::vector<std::vector<bool> >(code_size, std::vector<bool>(KSUB, 0)));
-    std::vector<int> bin(256*nlist, 0);
-    int total_len = 0;
+    // std::vector<std::vector<std::vector<Code_pair>>> hbm_cached_ps(nlist);
+    // std::vector<std::unordered_map<uint16_t, int>> original_item_to_cacheline(nlist);
+    // std::vector<std::vector<int>> cluster_starting_addr(nlist, std::vector<int>(1, 0));
+    // std::vector<std::vector<std::vector<bool> >> is_cached(nlist, std::vector<std::vector<bool> >(code_size, std::vector<bool>(KSUB, 0)));
+    // for(int cur_c_id=0; cur_c_id< nlist; cur_c_id++){
+    //     std::string cache_name =  "./SPACE1B-cache-4/SPACE1B_20_"+ std::to_string(cur_c_id) + "__decay_0_sampling_50_alpha"+ "_50_length_"+std::to_string(CACHE_LEN)+"_hbm_1.0.hbm.cluster";
+    //     std::ifstream hbm_graphfile(cache_name);
+    //     std::string line;
+    //     int nr_of_line=CACHE_PS_LEN;
+    //     int i=0;
+    //     for(i=0; i< nr_of_line; i++)
+    //     {
+    //         std::getline(hbm_graphfile, line);
+    //         if (hbm_graphfile.eof())
+    //         {
+    //             if(i<nr_of_line)
+    //                 printf("need to pad c_id: %d, cur line num: %d\n", cur_c_id, i);
+    //             break;
+    //         }
+    //         std::istringstream iss_pair(line);
+    //         uint16_t cache_num;
+    //         std::vector<uint16_t> cache_values;
+    //         std::vector<Code_pair> tmp;
+    //         std::unordered_map<uint8_t,uint8_t> col_value;
+    //         while (iss_pair >> cache_num) {
+    //             uint8_t first = static_cast<uint8_t>((cache_num >> 8) & 0xFF);
+    //             if(col_value.find(first) != col_value.end())
+    //             {
+    //                 break;
+    //             }
+    //             cache_values.push_back(cache_num);
+    //             col_value[first] = 1;
+    //         }
+    //         if(cache_values.size()!=CACHE_LEN)
+    //         {
+    //             i--;
+    //             continue;
+    //         }
+    //         for(uint16_t cache_num : cache_values)
+    //         {
+    //             uint8_t first = static_cast<uint8_t>((cache_num >> 8) & 0xFF);
+    //             uint8_t second = static_cast<uint8_t>(cache_num & 0xFF);
+    //             if(first > 32 || second > 256)
+    //             {
+    //                 printf("some error ,first too large. c_id : %d , line: %d \n", cur_c_id, i);
+    //             }
+    //             Code_pair cur_tmp;
+    //             cur_tmp.fir = first;
+    //             cur_tmp.sed = second;
+    //             tmp.push_back(cur_tmp);
+    //             original_item_to_cacheline[cur_c_id][cache_num] = i;
+    //             is_cached[cur_c_id][first][second] = 1;
+    //         }
+    //         hbm_cached_ps[cur_c_id].push_back(tmp);
+    //         if(tmp.size()!=CACHE_LEN)
+    //         {
+    //             printf("some error, tmp.size() != 4, in file %d\n", cur_c_id);
+    //         }
+    //         cluster_starting_addr[cur_c_id].push_back(cluster_starting_addr[cur_c_id].back() + (1 << tmp.size()));
+    //     }
+    //     std::vector<Code_pair> tmp0;
+    //     Code_pair cur_tmp0;
+    //     cur_tmp0.fir = 0;
+    //     cur_tmp0.sed = 0;
+    //     for(int m = 0; m < CACHE_LEN; m++)
+    //     {
+    //         tmp0.push_back(cur_tmp0);
+    //     }
+    //     while(i<nr_of_line)
+    //     {
+    //         hbm_cached_ps[cur_c_id].push_back(tmp0);
+    //         cluster_starting_addr[cur_c_id].push_back(cluster_starting_addr[cur_c_id].back() + (1 << tmp0.size()));
+    //         i++;
+    //     }
+    //     hbm_graphfile.close();
+    //     // if(cur_c_id==2059)
+    //     // {
+    //     //     for(int m=0;m<256;m++)
+    //     //     {
+    //     //         for(int n=0;n<4;n++){
+    //     //             printf("hbm_cached_ps[%d].fir: %d hbm_cached_ps[%d].sed: %d ",m*4+n,hbm_cached_ps[cur_c_id][m][n].fir,m*4+n, hbm_cached_ps[cur_c_id][m][n].sed);
+    //     //         }
+    //     //     }
+    //     // }
+    // }
 
-    for(int cur_c_id=0; cur_c_id< nlist; cur_c_id++){
-        std::string cache_name =  "./sift1B-cache/SIFTcache/centroid16_"+ std::to_string(cur_c_id) + "__decay_10_sampling_50_alpha"+ "_50_length_"+std::to_string(CACHE_LEN)+"_hbm_1.0.hbm.cluster";
-        std::ifstream hbm_graphfile(cache_name);
-        std::string line;
-        int nr_of_line=CACHE_PS_LEN;
-        int i=0;
-        for(i=0; i< nr_of_line; i++)
-        {
-            std::getline(hbm_graphfile, line);
-            if (hbm_graphfile.eof())
-            {
-                if(i<nr_of_line)
-                    printf("need to pad c_id: %d, cur line num: %d\n", cur_c_id, i);
-                break;
-            }
-            std::istringstream iss_pair(line);
-            uint16_t cache_num;
-            std::vector<uint16_t> cache_values;
-            std::vector<Code_pair> tmp;
-            std::unordered_map<uint8_t,uint8_t> col_value;
-            while (iss_pair >> cache_num) {
-                uint8_t first = static_cast<uint8_t>((cache_num >> 8) & 0xFF);
-                if(col_value.find(first) != col_value.end())
-                {
-                    printf("some error, first already exist. c_id : %d , line: %d \n", cur_c_id, i);
-                    break;
-                }
-                cache_values.push_back(cache_num);
-                col_value[first] = 1;
-            }
-            if(cache_values.size()!=CACHE_LEN)
-            {
-                i--;
-                continue;
-            }
-            for(uint16_t cache_num : cache_values)
-            {
-                uint8_t first = static_cast<uint8_t>((cache_num >> 8) & 0xFF);
-                uint8_t second = static_cast<uint8_t>(cache_num & 0xFF);
-                if(first > 16 || second > 256)
-                {
-                    printf("some error ,first too large. c_id : %d , line: %d \n", cur_c_id, i);
-                }
-                Code_pair cur_tmp;
-                cur_tmp.fir = first;
-                cur_tmp.sed = second;
-                tmp.push_back(cur_tmp);
-                original_item_to_cacheline[cur_c_id][cache_num] = i;
-                is_cached[cur_c_id][first][second] = 1;
-            }
-            hbm_cached_ps[cur_c_id].push_back(tmp);
-            if(tmp.size()!=CACHE_LEN)
-            {
-                printf("some error, tmp.size() != 4, in file %d\n", cur_c_id);
-            }
-            cluster_starting_addr[cur_c_id].push_back(cluster_starting_addr[cur_c_id].back() + (1 << tmp.size()));
-        }
-        std::vector<Code_pair> tmp0;
-        Code_pair cur_tmp0;
-        cur_tmp0.fir = 0;
-        cur_tmp0.sed = 0;
-        for(int m = 0; m < CACHE_LEN; m++)
-        {
-            tmp0.push_back(cur_tmp0);
-        }
-        total_len += i;
-        while(i<nr_of_line)
-        {
-            hbm_cached_ps[cur_c_id].push_back(tmp0);
-            cluster_starting_addr[cur_c_id].push_back(cluster_starting_addr[cur_c_id].back() + (1 << tmp0.size()));
-            i++;
-        }
-        hbm_graphfile.close();
-        // if(cur_c_id==2059)
-        // {
-        //     for(int m=0;m<256;m++)
-        //     {
-        //         for(int n=0;n<4;n++){
-        //             printf("hbm_cached_ps[%d].fir: %d hbm_cached_ps[%d].sed: %d ",m*4+n,hbm_cached_ps[cur_c_id][m][n].fir,m*4+n, hbm_cached_ps[cur_c_id][m][n].sed);
-        //         }
-        //     }
-        // }
-    }
-
-    std::vector<std::vector<uint16_t>> new_codes(nlist);
-    // std::unordered_map<int, std::vector<std::pair<uint8_t,uint8_t>>> hbm_access_set;
-    // std::vector<uint8_t> tmp_codes;
+    // std::vector<std::vector<uint16_t>> new_codes(nlist);
+    // // std::unordered_map<int, std::vector<std::pair<uint8_t,uint8_t>>> hbm_access_set;
+    // // std::vector<uint8_t> tmp_codes;
     int MAX_NUM = omp_get_max_threads();
-    uint32_t cache_hit = 0;
-    uint32_t cache_hit_total = 0;
-    //创建一个vector 记录 每个cid 的 reduce ratio
-    std::vector<float> reduce_ratio(nlist, 0);
-    int num = 0;
-    #pragma omp parallel for num_threads(MAX_NUM) reduction(+:cache_hit) reduction(+:cache_hit_total)
-    for(int i=0; i< nlist; i++)
-    {
-        // if(i==2059)
-        // {
-        //     printf("hhh");
-        // }
-        uint32_t reduce_len = 0;
-        for(int j = 0; j < ids[i].size(); j++)
-        {
-            uint8_t new_len = 0;
-            uint8_t no_cache_len = 0;
-            std::vector<uint8_t> tmp_codes;
-            std::vector<uint16_t> new_tmp_codes;
-            uint16_t base_adr = MS*KSUB;
-            tmp_codes.push_back(0);
-            std::unordered_map<int, std::vector<std::pair<uint8_t,uint8_t>>> hbm_access_set;
-            for(int k = 0; k< code_size; k++)
-            {
-                if(is_cached[i][k][codes[i][j*code_size + k]])
-                {
-                    Code_pair cur_tmp;
-                    cur_tmp.fir = static_cast<uint8_t>(k);
-                    cur_tmp.sed = static_cast<uint8_t>(codes[i][j*code_size + k]);
-                    uint8_t high_byte = k;
-                    uint8_t low_byte = codes[i][j*code_size + k];
-                    // 组合两个 uint8_t 成 uint16_t
-                    uint16_t combined_value = ((uint16_t)high_byte << 8) | (uint16_t)low_byte;
-                    int line_idx = original_item_to_cacheline[i][combined_value];
-                    for(int m=0; m < hbm_cached_ps[i][line_idx].size();m++)
-                    {
-                        if(hbm_cached_ps[i][line_idx][m].fir == cur_tmp.fir && hbm_cached_ps[i][line_idx][m].sed == cur_tmp.sed)
-                        {
-                            std::pair<uint8_t,uint8_t> std_tmp(static_cast<uint8_t>(k),static_cast<uint8_t>(m));
-                            hbm_access_set[line_idx].push_back(std_tmp);
-                            break;
-                        }
-                    }
-                }
-                else
-                {
-                    new_len++;
-                    no_cache_len++;
-                    tmp_codes.push_back(k);
-                    tmp_codes.push_back(codes[i][j*code_size + k]);
-                }
-            }
-            bool morethan1 = false;
-            for (const auto& kv : hbm_access_set) {
-                int key = kv.first;
-                const std::vector<std::pair<uint8_t,uint8_t>>& value = kv.second;
-                if(value.size()==1)
-                {
-                    int index_t = 0;
-                    int tmp_idx = 0;
-                    for(int m=0; m<value[0].first;m++)
-                    {
-                        if(codes[i][j*code_size + m]!=tmp_codes[tmp_idx+2])
-                        {
-                            index_t+=2;
-                        }
-                        else
-                        {
-                            tmp_idx+=2;
-                        }
-                    }
-                    if(tmp_codes.size() > value[0].first * 2 - index_t + 1){
-                        tmp_codes.insert(tmp_codes.begin() + value[0].first*2 - index_t + 1, value[0].first);//需要验证！！！
-                        tmp_codes.insert(tmp_codes.begin() + value[0].first*2 - index_t + 2, codes[i][j*code_size + value[0].first]);
-                    }
-                    else
-                    {
-                        tmp_codes.push_back(value[0].first);
-                        tmp_codes.push_back(codes[i][j*code_size + value[0].first]);
-                    }
-                    new_len++;
-                    no_cache_len++;
-                    continue;
-                }
-                morethan1 = true;
-                if(value.size()==CACHE_LEN)
-                {
-                    #pragma omp atomic
-                    bin[key*i]+=1;
-                }
-                uint16_t this_starting_addr = cluster_starting_addr[i][key];
-                for (std::pair<uint8_t,uint8_t> n : value) {
-                    this_starting_addr += static_cast<uint16_t>(1 << n.second); // 使用 std::pow 计算幂
-                }
-                // 将 this_starting_addr 拆分为两个 uint8_t 并存入 tmp_codes
-                // if(this_starting_addr >= 4096)
-                // {
-                //     printf("some error!!!\n");
-                // }
-                uint8_t high_byte = static_cast<uint8_t>((this_starting_addr >> 8) & 0xFF); // 高 8 位
-                uint8_t low_byte = static_cast<uint8_t>(this_starting_addr & 0xFF);          // 低 8 位
-                tmp_codes.push_back(high_byte);
-                tmp_codes.push_back(low_byte);
-                new_len++;
-            }
-            if(morethan1)
-            {
-                cache_hit_total++;
-            }
-            tmp_codes[0] = new_len * 2;
-            // tmp_codes[0] |= (no_cache_len-1);
-            // new_tmp_codes.push_back((uint16_t)(new_len - 1));
-            if(new_len < 14 && i == 1044)
-            {
-                num++;
-                printf("new_len: %d, num: %d\n", new_len, num);
-            }
-            if(new_len > 16)
-            {
-                printf("some error, new len larger than MS \n");
-            }
-            reduce_len += (16 - new_len);
-            for(int k = 0; k < no_cache_len; k++)
-            {
-                uint16_t adr = tmp_codes[k*2+1] * KSUB + tmp_codes[k*2+2];
-                new_tmp_codes.push_back(adr);
-            }
-            for(int k= no_cache_len; k < new_len; k++)
-            {
-                uint8_t high_byte = tmp_codes[k*2+1];
-                uint8_t low_byte = tmp_codes[k*2+2];
-                // 组合两个 uint8_t 成 uint16_t
-                uint16_t combined_value = ((uint16_t)high_byte << 8) | (uint16_t)low_byte;
-                new_tmp_codes.push_back(combined_value + base_adr);
-            }
-            for(int k = 0; k < CODE_SIZE; k++)
-            {
-                if(k < new_len)
-                    new_codes[i].push_back(new_tmp_codes[k]);
-                else
-                    new_codes[i].push_back(base_adr);//其实可以压缩，但是没想好！！！
-            }
-            if(new_len < 16)
-            {
-                new_codes[i][new_codes[i].size()-1] = new_len;
-            }
-            cache_hit++;
-            // if(new_len <= code_size){
-            //     tmp_codes[0] = new_len;
-            //     tmp_codes[0] |= 0x80;
-            //     for(int k = 0; k < CODE_SIZE; k++)
-            //     {
-            //         if(k < new_len + 1)
-            //             new_codes[i].push_back(tmp_codes[k]);
-            //         else
-            //             new_codes[i].push_back(0);//其实可以压缩，但是没想好！！！
-            //     }
-            //     cache_hit++;
-            // }
-            // else // 没有cache ， 存回原来的code
-            // {
-            //     for(int k = 0; k < code_size; k++)
-            //     {
-            //         if(k==0)
-            //         {
-            //             new_codes[i].push_back((codes[i][j*code_size + k] & 0x7f));
-            //         }
-            //         else
-            //         {
-            //             new_codes[i].push_back(codes[i][j*code_size + k]);
-            //         }
-            //     }
-            //     for(int k=code_size; k<CODE_SIZE;k++)
-            //     {
-            //         new_codes[i].push_back(0);
-            //     }
-            // }
-        }
-        reduce_ratio[i] = reduce_len/((float)ids[i].size()*code_size);
-        printf("c_id: %d, reduce_len: %d, ratio: %f\n", i, reduce_len, reduce_len/((float)ids[i].size()*code_size));
-    }
-    std::vector<std::vector<uint8_t>>().swap(codes);
-    std::vector<std::unordered_map<uint16_t, int>>().swap(original_item_to_cacheline);
-    std::vector<std::vector<int>>().swap(cluster_starting_addr);
-    std::vector<std::vector<std::vector<bool> >>().swap(is_cached);
+    // uint32_t cache_hit = 0;
+    // uint32_t cache_hit_total = 0;
+    // #pragma omp parallel for num_threads(MAX_NUM) reduction(+:cache_hit) reduction(+:cache_hit_total)
+    // for(int i=0; i< nlist; i++)
+    // {
+    //     if(i==2059)
+    //     {
+    //         printf("hhh");
+    //     }
+    //     for(int j = 0; j < ids[i].size(); j++)
+    //     {
+    //         uint8_t new_len = 0;
+    //         uint8_t no_cache_len = 0;
+    //         std::vector<uint8_t> tmp_codes;
+    //         std::vector<uint16_t> new_tmp_codes;
+    //         uint16_t base_adr = MS*KSUB;
+    //         tmp_codes.push_back(0);
+    //         std::unordered_map<int, std::vector<std::pair<uint8_t,uint8_t>>> hbm_access_set;
+    //         for(int k = 0; k< code_size; k++)
+    //         {
+    //             if(is_cached[i][k][codes[i][j*code_size + k]])
+    //             {
+    //                 Code_pair cur_tmp;
+    //                 cur_tmp.fir = static_cast<uint8_t>(k);
+    //                 cur_tmp.sed = static_cast<uint8_t>(codes[i][j*code_size + k]);
+    //                 uint8_t high_byte = k;
+    //                 uint8_t low_byte = codes[i][j*code_size + k];
+    //                 // 组合两个 uint8_t 成 uint16_t
+    //                 uint16_t combined_value = ((uint16_t)high_byte << 8) | (uint16_t)low_byte;
+    //                 int line_idx = original_item_to_cacheline[i][combined_value];
+    //                 for(int m=0; m < hbm_cached_ps[i][line_idx].size();m++)
+    //                 {
+    //                     if(hbm_cached_ps[i][line_idx][m].fir == cur_tmp.fir && hbm_cached_ps[i][line_idx][m].sed == cur_tmp.sed)
+    //                     {
+    //                         std::pair<uint8_t,uint8_t> std_tmp(static_cast<uint8_t>(k),static_cast<uint8_t>(m));
+    //                         hbm_access_set[line_idx].push_back(std_tmp);
+    //                         break;
+    //                     }
+    //                 }
+    //             }
+    //             else
+    //             {
+    //                 new_len++;
+    //                 no_cache_len++;
+    //                 tmp_codes.push_back(k);
+    //                 tmp_codes.push_back(codes[i][j*code_size + k]);
+    //             }
+    //         }
+    //         bool morethan1 = false;
+    //         for (const auto& kv : hbm_access_set) {
+    //             int key = kv.first;
+    //             const std::vector<std::pair<uint8_t,uint8_t>>& value = kv.second;
+    //             if(value.size()==1)
+    //             {
+    //                 int index_t = 0;
+    //                 int tmp_idx = 0;
+    //                 for(int m=0; m<value[0].first;m++)
+    //                 {
+    //                     if(codes[i][j*code_size + m]!=tmp_codes[tmp_idx+2])
+    //                     {
+    //                         index_t+=2;
+    //                     }
+    //                     else
+    //                     {
+    //                         tmp_idx+=2;
+    //                     }
+    //                 }
+    //                 if(tmp_codes.size() > value[0].first * 2 - index_t + 1){
+    //                     tmp_codes.insert(tmp_codes.begin() + value[0].first*2 - index_t + 1, value[0].first);//需要验证！！！
+    //                     tmp_codes.insert(tmp_codes.begin() + value[0].first*2 - index_t + 2, codes[i][j*code_size + value[0].first]);
+    //                 }
+    //                 else
+    //                 {
+    //                     tmp_codes.push_back(value[0].first);
+    //                     tmp_codes.push_back(codes[i][j*code_size + value[0].first]);
+    //                 }
+    //                 new_len++;
+    //                 no_cache_len++;
+    //                 continue;
+    //             }
+    //             morethan1 = true;
+    //             uint16_t this_starting_addr = cluster_starting_addr[i][key];
+    //             for (std::pair<uint8_t,uint8_t> n : value) {
+    //                 this_starting_addr += static_cast<uint16_t>(1 << n.second); // 使用 std::pow 计算幂
+    //             }
+    //             // 将 this_starting_addr 拆分为两个 uint8_t 并存入 tmp_codes
+    //             if(this_starting_addr >= 4096)
+    //             {
+    //                 printf("some error!!!\n");
+    //             }
+    //             uint8_t high_byte = static_cast<uint8_t>((this_starting_addr >> 8) & 0xFF); // 高 8 位
+    //             uint8_t low_byte = static_cast<uint8_t>(this_starting_addr & 0xFF);          // 低 8 位
+    //             tmp_codes.push_back(high_byte);
+    //             tmp_codes.push_back(low_byte);
+    //             new_len++;
+    //         }
+    //         if(morethan1)
+    //         {
+    //             cache_hit_total++;
+    //         }
+    //         tmp_codes[0] = new_len * 2;
+    //         // tmp_codes[0] |= (no_cache_len-1);
+    //         // new_tmp_codes.push_back((uint16_t)new_len);
+    //         if(new_len > 20)
+    //         {
+    //             printf("some error, new len larger than MS \n");
+    //         }
+    //         for(int k = 0; k < no_cache_len; k++)
+    //         {
+    //             uint16_t adr = tmp_codes[k*2+1] * KSUB + tmp_codes[k*2+2];
+    //             new_tmp_codes.push_back(adr);
+    //         }
+    //         for(int k= no_cache_len; k < new_len; k++)
+    //         {
+    //             uint8_t high_byte = tmp_codes[k*2+1];
+    //             uint8_t low_byte = tmp_codes[k*2+2];
+    //             // 组合两个 uint8_t 成 uint16_t
+    //             uint16_t combined_value = ((uint16_t)high_byte << 8) | (uint16_t)low_byte;
+    //             new_tmp_codes.push_back(combined_value + base_adr);
+    //         }
+    //         for(int k = 0; k < CODE_SIZE; k++)
+    //         {
+    //             if(k < new_len)
+    //                 new_codes[i].push_back(new_tmp_codes[k]);
+    //             else
+    //                 new_codes[i].push_back(base_adr);//其实可以压缩，但是没想好！！！
+    //         }
+    //         cache_hit++;
+    //         // if(new_len <= code_size){
+    //         //     tmp_codes[0] = new_len;
+    //         //     tmp_codes[0] |= 0x80;
+    //         //     for(int k = 0; k < CODE_SIZE; k++)
+    //         //     {
+    //         //         if(k < new_len + 1)
+    //         //             new_codes[i].push_back(tmp_codes[k]);
+    //         //         else
+    //         //             new_codes[i].push_back(0);//其实可以压缩，但是没想好！！！
+    //         //     }
+    //         //     cache_hit++;
+    //         // }
+    //         // else // 没有cache ， 存回原来的code
+    //         // {
+    //         //     for(int k = 0; k < code_size; k++)
+    //         //     {
+    //         //         if(k==0)
+    //         //         {
+    //         //             new_codes[i].push_back((codes[i][j*code_size + k] & 0x7f));
+    //         //         }
+    //         //         else
+    //         //         {
+    //         //             new_codes[i].push_back(codes[i][j*code_size + k]);
+    //         //         }
+    //         //     }
+    //         //     for(int k=code_size; k<CODE_SIZE;k++)
+    //         //     {
+    //         //         new_codes[i].push_back(0);
+    //         //     }
+    //         // }
+    //     }
+    //     std::vector<uint8_t>().swap(codes[i]);
+    //     std::unordered_map<uint16_t, int>().swap(original_item_to_cacheline[i]);
+    //     std::vector<int>().swap(cluster_starting_addr[i]);
+    //     std::vector<std::vector<bool> >().swap(is_cached[i]);
+    // }
+    // std::vector<std::vector<uint8_t>>().swap(codes);
+    // std::vector<std::unordered_map<uint16_t, int>>().swap(original_item_to_cacheline);
+    // std::vector<std::vector<int>>().swap(cluster_starting_addr);
+    // std::vector<std::vector<std::vector<bool> >>().swap(is_cached);
 
     std::vector<int8_t> codebook (M*ksub*dsub);
     float max_codebook = -100000;
@@ -568,64 +572,135 @@ int main() {
         codebook[i] = (int8_t)temp;//应该用量化的方法，后面改
     }
 
-    std::sort(bin.begin(), bin.end());
-    int total_bin_sum = 0;
-    for (int i = 256*nlist -1; i >= 256*nlist - total_len; i--) {
-        total_bin_sum += bin[i];
-    }
-    float avg_bin = (float)total_bin_sum / total_len;
-    printf("max bin count: %d, avg bin count: %f, min bin count: %d\n", bin[256*nlist -1], avg_bin, bin[256*nlist - total_len]);
     printf("max codebook: %f, min codebook: %f\n", max_codebook, min_codebook);
-    // printf("cache hit: %d, cache hit total: %d, reduce_len: %d ratio: %f\n", cache_hit, cache_hit_total, reduce_len, reduce_len/((float)1000000000*16));
-    // return 0;
 
     //传输encoded point 到相应的DPU
     int32_t nr_centroids = nlist / nr_of_dpus; // number of controids that one DPU need to store.
     std::vector<int32_t> Cp(nlist,0); // number of points in each centroid.
+    std::vector<int32_t> nr_of_copy(nlist,0);
+    std::unordered_map<int32_t, std::vector<int32_t> > copy_map;
+    std::unordered_map<int32_t, int32_t> map_copy;
     int32_t avg_cp = 0;
     for(int32_t i = 0;i<nlist;i++)
     {
         Cp[i] = ids[i].size();
-        avg_cp += Cp[i];
+        if(Cp[i] > MAX_DPU_STORE_SIZE * 0.8)
+        {
+            int nr_c = (Cp[i] + MAX_DPU_STORE_SIZE * 0.8 - 1) / (MAX_DPU_STORE_SIZE * 0.8);
+            int each_size = Cp[i] / nr_c;
+            int last_size = Cp[i] - each_size*(nr_c - 1);
+            Cp[i] = each_size;
+            for(int m=1; m < nr_c-1; m++)
+            {
+                Cp.push_back(each_size);
+                copy_map[i].push_back(Cp.size()-1);
+                map_copy[Cp.size()-1] = i;
+                std::vector<faiss::idx_t> temp2_ids;
+                std::vector<uint16_t> temp2_codes;
+                for(int k=m*each_size; k<(m+1)*each_size; k++)
+                {
+                    temp2_ids.push_back(ids[i][k]);
+                    for(int m=0; m<code_size; m++)
+                    {
+                        temp2_codes.push_back(new_codes[i][k*code_size + m]);
+                    }
+                }
+                ids.push_back(temp2_ids);
+                new_codes.push_back(temp2_codes);
+            }
+            Cp.push_back(last_size);
+            copy_map[i].push_back(Cp.size()-1);
+            map_copy[Cp.size()-1] = i;
+            std::vector<faiss::idx_t> temp_ids;
+            std::vector<uint16_t> temp_codes;
+            for(int k=each_size; k<ids[i].size(); k++)
+            {
+                temp_ids.push_back(ids[i][k]);
+                for(int m=0; m<code_size; m++)
+                {
+                    temp_codes.push_back(new_codes[i][k*code_size + m]);
+                }
+            }
+            ids.push_back(temp_ids);
+            new_codes.push_back(temp_codes);
+        }
+        avg_cp += ids[i].size();
     }
     avg_cp = avg_cp / nlist;//average points in each centroid.
 
-    int32_t nq;
-    float* xq;
+    int32_t nq=10000;
+    // float* xq;
 
-    {
-        printf("[%.3f s] Loading queries\n", elapsed() - t0);
+    // {
+    //     printf("[%.3f s] Loading queries\n", elapsed() - t0);
 
-        int32_t d2;
-        xq = bvecs_read("./sift1B/bigann_query.bvecs", &d2, &nq);
-        // xq = fvecs_read("./sift1M/sift_query.fvecs", &d2, &nq);
-        assert(d == d2 || !"query does not have same dimension as train set");
-    }
+    //     int32_t d2;
+    //     xq = bvecs_read("./sift1B/bigann_query.bvecs", &d2, &nq);
+    //     // xq = fvecs_read("./sift1M/sift_query.fvecs", &d2, &nq);
+    //     assert(d == d2 || !"query does not have same dimension as train set");
+    // }
 
     int32_t ks;         // nb of results per query in the GT
-    faiss::idx_t* gt; // nq * k matrix of ground-truth nearest-neighbors
+    // faiss::idx_t* gt; // nq * k matrix of ground-truth nearest-neighbors
 
-    printf("[%.3f s] Loading ground truth for %ld queries\n",
-            elapsed() - t0,
-            nq);
+    // printf("[%.3f s] Loading ground truth for %ld queries\n",
+    //         elapsed() - t0,
+    //         nq);
 
-    // load ground-truth and convert int to long
-    int32_t nq2;
-    int* gt_int = ivecs_read("./sift1B/idx_1000M.ivecs", &ks, &nq2);
-    // int* gt_int = ivecs_read("./sift1M/sift_groundtruth.ivecs", &ks, &nq2);
-    assert(nq2 == nq || !"incorrect nb of ground truth entries");
+    // // load ground-truth and convert int to long
+    // int32_t nq2;
+    // int* gt_int = ivecs_read("./sift1B/idx_1000M.ivecs", &ks, &nq2);
+    // // int* gt_int = ivecs_read("./sift1M/sift_groundtruth.ivecs", &ks, &nq2);
+    // assert(nq2 == nq || !"incorrect nb of ground truth entries");
 
-    gt = new faiss::idx_t[ks * nq];
-    for (int i = 0; i < ks * nq; i++) {
-        gt[i] = gt_int[i];
+    // gt = new faiss::idx_t[ks * nq];
+    // for (int i = 0; i < ks * nq; i++) {
+    //     gt[i] = gt_int[i];
+    // }
+    // delete[] gt_int;
+
+    // Read query file
+    std::ifstream fq("./SPACE1B/query.bin", std::ios::binary);
+    int q_count = readBinaryInt<int>(fq);
+    int q_dimension = readBinaryInt<int>(fq);
+    d = q_dimension;
+    printf("[%.3f s] q_count: %d  q_dimension: %d\n", elapsed() - t0, q_count, q_dimension);
+    int8_t* queries = new int8_t[q_count * q_dimension];
+    readBinaryData(fq, queries, q_count * q_dimension * sizeof(int8_t));
+    fq.close();
+
+    // Read truth file
+    std::ifstream ftruth("./SPACE1B/truth.bin", std::ios::binary);
+    int t_count = readBinaryInt<int>(ftruth);
+    int topk = readBinaryInt<int>(ftruth);
+    printf("[%.3f s] t_count: %d  topk: %d\n", elapsed() - t0, t_count, topk);
+    int32_t* truth_vids = new int32_t[t_count * topk];
+    float* truth_distances = new float[t_count * topk];
+    readBinaryData(ftruth, truth_vids, t_count * topk * sizeof(int32_t));
+    readBinaryData(ftruth, truth_distances, t_count * topk * sizeof(float));
+    ftruth.close();
+
+    printf("[%.3f s] Loading queries\n", elapsed() - t0);
+    float* xq = new float[q_count * q_dimension];
+    for (int i = 0; i < q_count * q_dimension; ++i) {
+        xq[i] = static_cast<float>(queries[i]);
     }
-    delete[] gt_int;
+    delete[] queries;
+
+    ks = topk;         // nb of results per query in the GT
+    faiss::idx_t* gt = new faiss::idx_t[t_count * topk]; // nq * k matrix of ground-truth nearest-neighbors
+    for (int i = 0; i < t_count * topk; ++i) {
+        gt[i] = static_cast<faiss::idx_t>(truth_vids[i]);
+    }
+    delete[] truth_vids;
+    delete[] truth_distances;
 
     int32_t nq_test = nq / 10 ;
+    nq_test = BS;
     int32_t nq_freq = nq_test;// 前9/10的数据用来统计frequency
     float* xq_freq = new float[d*nq_freq];
     // nq_test = 1;
-    for(int i=9000*d;i<d*nq;i++)
+    for(int i=9000*d;i<d*(9000+nq_freq);i++)
     {
         xq_freq[i-9000*d] = xq[i];
     }
@@ -636,32 +711,15 @@ int main() {
     params.set_index_parameters(index, set_nprobs.c_str());
     int32_t nprobe = NPROBS;
     faiss::idx_t* idx = new faiss::idx_t[nq_freq * nprobe];
-    faiss::idx_t* idx_q_m = new faiss::idx_t[nq_freq * nprobe];
     float* coarse_dis = new float[nq_freq * nprobe];
     index->quantizer->search(nq_freq,xq_freq,nprobe,coarse_dis,idx,nullptr);
     delete[] xq_freq;
-    //将reduce_ratio 降序排序
-    std::vector<std::pair<float, int>> reduce_ratio_idx;
-    for (int32_t i = 0; i < nlist; ++i) {
-        reduce_ratio_idx.push_back(std::make_pair(reduce_ratio[i], i));
-    }
-    std::sort(reduce_ratio_idx.begin(), reduce_ratio_idx.end(), comparefloatab);
-
     //統計idx的頻率
-    std::vector<int32_t> Fq(nlist,0); // access frequency for each centroid.Fq[idx[i]]++;
-    float avg_reduce_ratio = 0;
-    for(int32_t i = 0; i < nq_freq*nprobe;i+=nprobe)
+    std::vector<int32_t> Fq(nlist,0); // access frequency for each centroid.
+    for(int32_t i = 0; i < nq_freq*nprobe;i++)
     {
-        for(int32_t j = 0; j < nprobe; j++)
-        {
-            Fq[reduce_ratio_idx[j].second]++;
-            avg_reduce_ratio += reduce_ratio_idx[j].first;
-            idx_q_m[i+j] = reduce_ratio_idx[j].second;
-        }
+        Fq[idx[i]]++;
     }
-    printf("before avg_reduce_ratio: %f\n", avg_reduce_ratio);
-    avg_reduce_ratio = avg_reduce_ratio / ((float)nq_freq*nprobe);
-    printf("avg_reduce_ratio: %f\n", avg_reduce_ratio);
     delete[] idx;
     delete[] coarse_dis;
     int32_t avg_fq = 0;
@@ -677,20 +735,26 @@ int main() {
     int32_t LUT_process = d * 256 * 8; // update_LUT的计算量，因为有乘法和没有乘法速度差了5x，所以*5
     int32_t avg_Centroids = (nq_freq * nprobe) / (nr_of_dpus); // 平均每个DPU需要计算的 centroid 的个数
 
-    std::vector<int32_t> C_process(nlist,0);
-    for(int i=0;i<nlist;i++)
+    std::vector<int32_t> C_process(Cp.size(),0);
+    for(int i=0;i<Cp.size();i++)
     {
-        C_process[i] = Fq[i] * Cp[i] ;
-        avg_ps += (std::ceil(static_cast<double>(C_process[i]) / nr_of_dpus));
+        if(i < nlist){
+            C_process[i] = Fq[i] * Cp[i] ;
+        }
+        else
+        {
+            C_process[i] = Fq[map_copy[i]] * Cp[i] ;
+        }
+        avg_ps += C_process[i];
     }
-    avg_process = avg_ps;
+    avg_process = std::ceil(static_cast<double>(avg_ps) / nr_of_dpus);
     printf("[%.6f s] avg_process: %d\n",
             elapsed() - t0,
             avg_process);
 
     //获取 C_process 降序排序的索引
     std::vector<std::pair<int, int>> C_process_idx;
-    for (int32_t i = 0; i < nlist; ++i) {
+    for (int32_t i = 0; i < Cp.size(); ++i) {
         C_process_idx.push_back(std::make_pair(C_process[i], i));
     }
     std::sort(C_process_idx.begin(), C_process_idx.end(), compareab);
@@ -731,12 +795,12 @@ int main() {
     std::vector<std::vector<float>>().swap(C_dis);
 
     //记录centroid是否已经分配
-    std::vector<int8_t> visit(nlist,0);
+    std::vector<int8_t> visit(Cp.size(),0);
     //记录每个 DPU 存的 centroid 的编号
     std::vector<std::vector<int32_t> > dpu_id(nr_of_dpus);
     std::vector<std::vector<Code_pair>> dpu_hbm_cached_ps(nr_of_dpus);
     std::vector<int32_t> dpu_size(nr_of_dpus,0); // 记录每个DPU含有encoded point 个数
-    std::vector<std::vector<int32_t> > C_dpu(nlist);//记录每个centroid分配到的DPU id
+    std::vector<std::vector<int32_t> > C_dpu(Cp.size());//记录每个centroid分配到的DPU id
     std::vector<std::vector<int64_t> > dpu_store_ids(nr_of_dpus);//每个DPU 存的 ids
     std::vector<std::vector<uint16_t> > dpu_store_code(nr_of_dpus);//每个DPU 存的 encoded points
     std::vector<std::vector<int32_t> > dpu_store_offset(nr_of_dpus);// 每个DPU 存的 centroid 集合的 offset
@@ -756,12 +820,12 @@ int main() {
         if(each_dpu_process[i] >= avg_process || dpu_store_offset[i][dpu_store_offset[i].size()-1] >= MAX_DPU_STORE_SIZE)
             continue;
         int begin = 0;
-        while(begin<nlist && (visit[C_process_idx[begin].second]!=0 || C_process_idx[begin].first == 0))
+        while(begin<Cp.size() && (visit[C_process_idx[begin].second]!=0 || C_process_idx[begin].first == 0))
         {
             visit[C_process_idx[begin].second] = 1;
             begin++;
         }
-        if(begin == nlist)
+        if(begin == Cp.size())
             continue;
         visit[C_process_idx[begin].second] = 1;
         int32_t C_id = C_process_idx[begin].second;
@@ -769,7 +833,7 @@ int main() {
         int dpu_offsets = dpu_store_offset[i][dpu_store_offset[i].size()-1];
         int j = i;
         bool unsuitable_dpu = false;
-        if(C_process[C_id] > avg_process * 1)
+        if(C_process[C_id] > avg_process * 1.10)
         {
             int cnr_of_dpu = (C_process[C_id] + avg_process - 1) / avg_process; // 该centroid 应该分配到多个DPU
             int per_process = C_process[C_id] / cnr_of_dpu;
@@ -792,13 +856,13 @@ int main() {
                 cnr_of_dpu--;
                 dpu_id[j].push_back(C_id);
                 max_dpu_id = std::max(max_dpu_id,(int32_t)dpu_id[j].size());
-                for(int m=0; m<hbm_cached_ps[C_id].size();m++)
-                {
-                    for(int n=0; n<CACHE_LEN; n++)
-                    {
-                        dpu_hbm_cached_ps[j].push_back(hbm_cached_ps[C_id][m][n]);
-                    }
-                }
+                // for(int m=0; m<hbm_cached_ps[C_id].size();m++)
+                // {
+                //     for(int n=0; n<CACHE_LEN; n++)
+                //     {
+                //         dpu_hbm_cached_ps[j].push_back(hbm_cached_ps[C_id][m][n]);
+                //     }
+                // }
                 dpu_size[j] += Cp[C_id];
                 C_dpu[C_id].push_back(j);
                 for(int32_t k = 0; k < Cp[C_id];k++)
@@ -865,13 +929,13 @@ int main() {
             each_dpu_process[j] += C_process[C_id];
             dpu_id[j].push_back(C_id);
             max_dpu_id = std::max(max_dpu_id,(int32_t)dpu_id[j].size());
-            for(int m=0; m<hbm_cached_ps[C_id].size();m++)
-            {
-                for(int n=0; n<CACHE_LEN; n++)
-                {
-                    dpu_hbm_cached_ps[j].push_back(hbm_cached_ps[C_id][m][n]);
-                }
-            }
+            // for(int m=0; m<hbm_cached_ps[C_id].size();m++)
+            // {
+            //     for(int n=0; n<CACHE_LEN; n++)
+            //     {
+            //         dpu_hbm_cached_ps[j].push_back(hbm_cached_ps[C_id][m][n]);
+            //     }
+            // }
             dpu_size[j] += Cp[C_id];
             C_dpu[C_id].push_back(j);
             dpu_offsets = dpu_store_offset[j][dpu_store_offset[j].size()-1];
@@ -890,6 +954,8 @@ int main() {
 
         while(each_dpu_process[j] < avg_process)
         {
+            if(C_id >= nlist)
+                break;
             if(visit[C_dis_sorted_indices[C_id][dis_id]]!=0 || C_process[C_dis_sorted_indices[C_id][dis_id]] == 0)
             {
                 dis_id++;
@@ -908,13 +974,13 @@ int main() {
             visit[next_id] = 1;
             dpu_id[j].push_back(next_id);
             max_dpu_id = std::max(max_dpu_id,(int32_t)dpu_id[j].size());
-            for(int m=0; m<hbm_cached_ps[next_id].size();m++)
-            {
-                for(int n=0; n<CACHE_LEN; n++)
-                {
-                    dpu_hbm_cached_ps[j].push_back(hbm_cached_ps[next_id][m][n]);
-                }
-            }
+            // for(int m=0; m<hbm_cached_ps[next_id].size();m++)
+            // {
+            //     for(int n=0; n<CACHE_LEN; n++)
+            //     {
+            //         dpu_hbm_cached_ps[j].push_back(hbm_cached_ps[next_id][m][n]);
+            //     }
+            // }
             each_dpu_process[j] += C_process[next_id];
             dpu_size[j] += Cp[next_id];
             C_dpu[next_id].push_back(j);
@@ -932,33 +998,39 @@ int main() {
             std::vector<faiss::idx_t>().swap(ids[next_id]);
         }
     }
-    for(int begin=0; begin<nlist; begin++)// 以DPU_STORE_SIZE为重点,找到最合适的DPU
+    for(int begin=0; begin<Cp.size(); begin++)// 以DPU_STORE_SIZE为重点,找到最合适的DPU
     {
         if(visit[begin]==1)
             continue;
         visit[begin] = 1;
         int32_t C_id = begin;
         std::vector<std::pair<int, int>> Dpu_proc_idx;
+        int32_t min_dpu_store = 99999999;
         for(int i=0; i< nr_of_dpus; i++)
         {
+            min_dpu_store = std::min(min_dpu_store, dpu_store_offset[i][dpu_store_offset[i].size()-1]);
             if(dpu_store_offset[i][dpu_store_offset[i].size()-1]+Cp[C_id] < MAX_DPU_STORE_SIZE)
             {
                 Dpu_proc_idx.push_back(std::make_pair(each_dpu_process[i], i));
             }
         }
         std::sort(Dpu_proc_idx.begin(), Dpu_proc_idx.end(), comparebaINT);
+        if(Dpu_proc_idx.size()==0)
+        {
+            printf("min_dpu_store size = %d , Cp[%d] = :%d\n",min_dpu_store, C_id, Cp[C_id]);
+        }
         int D_id = Dpu_proc_idx[0].second;
         int dpu_offsets = dpu_store_offset[D_id][dpu_store_offset[D_id].size()-1];
         each_dpu_process[D_id] += C_process[C_id];
         dpu_id[D_id].push_back(C_id);
         max_dpu_id = std::max(max_dpu_id,(int32_t)dpu_id[D_id].size());
-        for(int m=0; m<hbm_cached_ps[C_id].size();m++)
-        {
-            for(int n=0; n<CACHE_LEN; n++)
-            {
-                dpu_hbm_cached_ps[D_id].push_back(hbm_cached_ps[C_id][m][n]);
-            }
-        }
+        // for(int m=0; m<hbm_cached_ps[C_id].size();m++)
+        // {
+        //     for(int n=0; n<CACHE_LEN; n++)
+        //     {
+        //         dpu_hbm_cached_ps[D_id].push_back(hbm_cached_ps[C_id][m][n]);
+        //     }
+        // }
         dpu_size[D_id] += Cp[C_id];
         C_dpu[C_id].push_back(D_id);
         for(int32_t k = 0; k < Cp[C_id];k++)
@@ -1040,7 +1112,7 @@ int main() {
     std::vector<std::vector<faiss::idx_t>>().swap(ids);
     std::vector<std::vector<uint16_t>>().swap(new_codes);
 
-    for(int i=0 ;i< nlist;i++)
+    for(int i=0 ;i< Cp.size();i++)
     {
         if(visit[i]==false)
             printf("some error!!! centroid %d not allocate. \n",i);
@@ -1067,12 +1139,8 @@ int main() {
     }
     printf("max dpu_proc %d : %d \n", max_did, max_dproc);
     printf("min dpu_proc %d : %d \n", min_did, min_dproc);
-    printf("cache code rate: %f\n", (float)((float)cache_hit / 1000000000));
-    printf("cache code rate total: %f\n", (float)((float)cache_hit_total / 1000000000));
-    for(int i=0;i<dpu_id[max_did].size();i++)
-    {
-        printf("dpu %d : %d\n",max_did,dpu_id[max_did][i]);
-    }
+    // printf("cache code rate: %f\n", (float)((float)cache_hit / 1000000000));
+    // printf("cache code rate total: %f\n", (float)((float)cache_hit_total / 1000000000));
 
     // std::vector<int32_t> N_div(nlist,0); // Number of dpu one centroid need to be divided.
     // std::vector<int32_t> AP(nlist,0); // Average points number for each centroid.
@@ -1153,6 +1221,7 @@ int main() {
     for (const auto& vec : dpu_store_ids) {
         max_size = std::max(max_size, vec.size());
     }
+    max_size = ALIGN(max_size,8);
     for (auto& vec : dpu_store_ids) {
         vec.resize(max_size, 0);
     }
@@ -1160,6 +1229,7 @@ int main() {
     for (const auto& vec : dpu_store_code) {
         max_size = std::max(max_size, vec.size());
     }
+    max_size = ALIGN(max_size,8);
     for (auto& vec : dpu_store_code) {
         vec.resize(max_size, 0);
     }
@@ -1172,6 +1242,7 @@ int main() {
     for (const auto& vec : dpu_store_offset) {
         max_size = std::max(max_size, vec.size());
     }
+    max_size = ALIGN(max_size,8);
     for (auto& vec : dpu_store_offset) {
         vec.resize(max_size, 0);
     }
@@ -1182,6 +1253,7 @@ int main() {
     for (const auto& vec : dpu_id) {
         max_size = std::max(max_size, vec.size());
     }
+    max_size = ALIGN(max_size,8);
     for (auto& vec : dpu_id) {
         vec.resize(max_size, 0);
     }
@@ -1195,10 +1267,10 @@ int main() {
     Code_pair flat;
     flat.fir = 0;
     flat.sed = 0;
-    for (auto& vec : dpu_hbm_cached_ps) {
-        vec.resize(max_size, flat);
-    }
-    system.copy("hbm_cached_ps",dpu_hbm_cached_ps);
+    // for (auto& vec : dpu_hbm_cached_ps) {
+    //     vec.resize(max_size, flat);
+    // }
+    // system.copy("hbm_cached_ps",dpu_hbm_cached_ps);
 
     system.copy("codebook_M",codebook);
 
@@ -1213,7 +1285,7 @@ int main() {
     }
     printf("[%.6f s] Perform a search on %ld queries\n",
             elapsed() - t0,
-            nq);
+            nq_test);
 
     // output buffers
     faiss::idx_t* I = new faiss::idx_t[nq_test * ks];
@@ -1223,11 +1295,6 @@ int main() {
     faiss::idx_t* idx_q = new faiss::idx_t[nq_test * nprobe];
     float* coarse_dis_q = new float[nq_test * nprobe];
     index->quantizer->search(nq_test,xq_tmp,nprobe,coarse_dis_q,idx_q,nullptr);
-
-    for(int i=0;i<nq_test*nprobe;i++)
-    {
-        idx_q[i] = idx_q_m[i];
-    }
 
     // q_c layer: [nq_test, nprobe, d]
     int32_t* q_c = new int32_t[d*nq_test*nprobe];
@@ -1241,7 +1308,7 @@ int main() {
     std::vector<std::vector<bool> > q_dpu(nq_test,std::vector<bool>(nr_of_dpus,false)); // 每个query 对应的dpu
     std::vector<std::vector<int> > I_dpu_offset(nq_test,std::vector<int>(nr_of_dpus, -1)); // 记录读取DPU结果的位置，避免后续重复读
     std::vector<int> dpu_res_offset(nr_of_dpus,0); // 记录DPU结果的偏移
-    std::vector<int32_t> C_dpu_idx(nlist, 0);
+    std::vector<int32_t> C_dpu_idx(Cp.size(), 0);
     for(int w = 0; w < nr_of_dpus; w++)
     {
         dpu_q_o[w].push_back(0);
@@ -1261,7 +1328,30 @@ int main() {
                 int8_t pow_q_c = (int8_t)((xq_tmp[i*d+k] - centroid_q[k]));
                 dpu_q_c[C_dpu[idx_q[i*nprobe+j]][C_dpu_idx[idx_q[i*nprobe+j]]]].push_back(pow_q_c);
             }
+            dpu_q_c[C_dpu[idx_q[i*nprobe+j]][C_dpu_idx[idx_q[i*nprobe+j]]]].push_back(0);
+            dpu_q_c[C_dpu[idx_q[i*nprobe+j]][C_dpu_idx[idx_q[i*nprobe+j]]]].push_back(0);
+            dpu_q_c[C_dpu[idx_q[i*nprobe+j]][C_dpu_idx[idx_q[i*nprobe+j]]]].push_back(0);
+            dpu_q_c[C_dpu[idx_q[i*nprobe+j]][C_dpu_idx[idx_q[i*nprobe+j]]]].push_back(0);
             C_dpu_idx[idx_q[i*nprobe+j]] = (C_dpu_idx[idx_q[i*nprobe+j]] +1 ) % C_dpu[idx_q[i*nprobe+j]].size();
+            if(copy_map.find(idx_q[i*nprobe+j])!=copy_map.end())
+            {
+                for(int m=0; m<copy_map[idx_q[i*nprobe+j]].size();m++){
+                    int new_dpu = copy_map[idx_q[i*nprobe+j]][m];
+                    dpu_qCentroid[C_dpu[new_dpu][C_dpu_idx[new_dpu]]].push_back(new_dpu);
+                    dpu_probe_num[C_dpu[new_dpu][C_dpu_idx[new_dpu]]]++;
+                    q_dpu[i][C_dpu[new_dpu][C_dpu_idx[new_dpu]]] = true;
+                    for(int k=0;k<d;k++)
+                    {
+                        int8_t pow_q_c = (int8_t)((xq_tmp[i*d+k] - centroid_q[k]));
+                        dpu_q_c[C_dpu[new_dpu][C_dpu_idx[new_dpu]]].push_back(pow_q_c);
+                    }
+                    dpu_q_c[C_dpu[new_dpu][C_dpu_idx[new_dpu]]].push_back(0);
+                    dpu_q_c[C_dpu[new_dpu][C_dpu_idx[new_dpu]]].push_back(0);
+                    dpu_q_c[C_dpu[new_dpu][C_dpu_idx[new_dpu]]].push_back(0);
+                    dpu_q_c[C_dpu[new_dpu][C_dpu_idx[new_dpu]]].push_back(0);
+                    C_dpu_idx[new_dpu] = (C_dpu_idx[new_dpu] +1 ) % C_dpu[new_dpu].size();
+                }
+            }
         }
         for(int w = 0; w < nr_of_dpus; w++)
         {
@@ -1311,6 +1401,7 @@ int main() {
     for (const auto& vec : dpu_q_c) {
         max_size = std::max(max_size, vec.size());
     }
+    max_size = ALIGN(max_size,8);
     for (auto& vec : dpu_q_c) {
         vec.resize(max_size, 0);
     }
@@ -1320,6 +1411,7 @@ int main() {
     for (const auto& vec : dpu_qCentroid) {
         max_size = std::max(max_size, vec.size());
     }
+    max_size = ALIGN(max_size,8);
     for (auto& vec : dpu_qCentroid) {
         vec.resize(max_size, 0);
     }
@@ -1330,6 +1422,7 @@ int main() {
     for (const auto& vec : dpu_q_o) {
         max_size = std::max(max_size, vec.size());
     }
+    max_size = ALIGN(max_size,8);
     for (auto& vec : dpu_q_o) {
         vec.resize(max_size, -1);
     }
@@ -1378,7 +1471,7 @@ int main() {
             elapsed() - t0,
             (t4-t3)*1000);
 
-    system.dpus()[267]->log(std::cout);
+    system.dpus()[195]->log(std::cout);
     // system.log(std::cout);
 
     // {
@@ -1437,7 +1530,7 @@ int main() {
     // }
 
     t4 = elapsed();
-
+    #pragma omp parallel for num_threads(MAX_NUM)
     for(int i=0;i<nq_test;i++)
     {
         for(int j=0; j<nr_of_dpus; j++)
@@ -1468,9 +1561,11 @@ int main() {
             }
         }
     }
+    #pragma omp parallel for num_threads(MAX_NUM) schedule(guided)
     for(int i=0;i<nq_test;i++)
     {
         std::sort(I_temp[i].begin(), I_temp[i].end(), compareba);
+        #pragma omp parallel for
         for(int j=0; j<ks; j++)
         {
             I[i*ks + j] = I_temp[i][j].second;
@@ -1488,7 +1583,7 @@ int main() {
     // evaluate result by hand.
     int n_1 = 0, n_10 = 0, n_100 = 0;
     for (int i = nq_freq+begin_idx; i < nq; i++) {
-        int gt_nn = gt[i * 1000];
+        int gt_nn = gt[i * 100];
         for (int j = 0; j < ks; j++) {
             if (I[(i-nq_freq - begin_idx) * ks + j] == gt_nn) {
                 if (j < 1)

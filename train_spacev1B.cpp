@@ -1,0 +1,368 @@
+/**
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
+ */
+
+ #include <cassert>
+ #include <cmath>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+ #include <cstdint>
+ #include <iostream>
+ #include <fstream>
+ #include <vector>
+ 
+ #include <sys/stat.h>
+ #include <sys/types.h>
+ #include <unistd.h>
+ 
+ #include <sys/time.h>
+ 
+ #include <faiss/AutoTune.h>
+ #include <faiss/index_factory.h>
+ #include <faiss/IndexIVFPQ.h>
+ #include <faiss/index_io.h>
+ #include <faiss/invlists/OnDiskInvertedLists.h>
+ 
+ /**
+  * To run this demo, please download the ANN_SIFT1M dataset from
+  *
+  *   http://corpus-texmex.irisa.fr/
+  *
+  * and unzip it to the sudirectory sift1M.
+  **/
+ 
+ 
+ // Helper function to read integers from a binary file
+ template<typename T>
+ T readBinaryInt(std::ifstream& file) {
+     T value;
+     file.read(reinterpret_cast<char*>(&value), sizeof(T));
+     return value;
+ }
+ 
+ // Helper function to read data from a binary file into a buffer
+ void readBinaryData(std::ifstream& file, void* buffer, size_t size) {
+     file.read(reinterpret_cast<char*>(buffer), size);
+ }
+ 
+ /*****************************************************
+  * I/O functions for fvecs and ivecs
+  *****************************************************/
+ float* bvecs_read(const char* fname, size_t* d_out, size_t* n_out) {
+     FILE* f = fopen(fname, "r");
+     if (!f) {
+         fprintf(stderr, "could not open %s\n", fname);
+         perror("");
+         abort();
+     }
+     int d;
+     fread(&d, 1, sizeof(int), f);
+     assert((d > 0 && d < 1000000) || !"unreasonable dimension");
+     fseek(f, 0, SEEK_SET);
+     struct stat st;
+     fstat(fileno(f), &st);
+     size_t sz = st.st_size;
+     assert(sz % (1* 4 + d) == 0 || !"weird file size");
+     size_t n = sz / (1* 4 + d);
+ 
+     *d_out = d;
+     *n_out = n;
+     uint8_t* x = new uint8_t[n * (d + 1*4)];
+     size_t nr = fread(x, 1, n * (d + 1 * 4), f);
+     assert(nr == n * (d + 1 * 4) || !"could not read whole file");
+ 
+     // shift array to remove row headers
+     for (size_t i = 0; i < n; i++)
+         memmove(x + i * d, x + 4 + i * (d + 4), d * sizeof(*x));
+ 
+     float* xt = new float[n * (d)];
+     for (size_t i = 0; i < n*d; i++)
+         xt[i] = x[i];
+ 
+     fclose(f);
+     return xt;
+ }
+ 
+ float* fvecs_read(const char* fname, size_t* d_out, size_t* n_out) {
+     FILE* f = fopen(fname, "r");
+     if (!f) {
+         fprintf(stderr, "could not open %s\n", fname);
+         perror("");
+         abort();
+     }
+     int d;
+     fread(&d, 1, sizeof(int), f);
+     assert((d > 0 && d < 1000000) || !"unreasonable dimension");
+     fseek(f, 0, SEEK_SET);
+     struct stat st;
+     fstat(fileno(f), &st);
+     size_t sz = st.st_size;
+     assert(sz % ((d + 1) * 4) == 0 || !"weird file size");
+     size_t n = sz / ((d + 1) * 4);
+ 
+     *d_out = d;
+     *n_out = n;
+     float* x = new float[n * (d + 1)];
+     size_t nr = fread(x, sizeof(float), n * (d + 1), f);
+     assert(nr == n * (d + 1) || !"could not read whole file");
+ 
+     // shift array to remove row headers
+     for (size_t i = 0; i < n; i++)
+         memmove(x + i * d, x + 1 + i * (d + 1), d * sizeof(*x));
+ 
+     fclose(f);
+     return x;
+ }
+ 
+ // not very clean, but works as long as sizeof(int) == sizeof(float)
+ int* ivecs_read(const char* fname, size_t* d_out, size_t* n_out) {
+     return (int*)fvecs_read(fname, d_out, n_out);
+ }
+ 
+ double elapsed() {
+     struct timeval tv;
+     gettimeofday(&tv, nullptr);
+     return tv.tv_sec + tv.tv_usec * 1e-6;
+ }
+ 
+ int main() {
+     double t0 = elapsed();
+ 
+     // this is typically the fastest one.
+     // const char* index_key = "IVF4096,Flat";
+ 
+     // these ones have better memory usage
+     // const char *index_key = "Flat";
+     // const char *index_key = "PQ32";
+     // const char *index_key = "PCA80,Flat";
+     // const char *index_key = "IVF4096,PQ8+16";
+     const char *index_key = "IVF4096,PQ20";
+     // const char *index_key = "IMI2x8,PQ32";
+     // const char *index_key = "IMI2x8,PQ8+16";
+     // const char *index_key = "OPQ16_64,IMI2x8,PQ8+16";
+ 
+     faiss::IndexIVFPQ* index;
+ 
+    //  index = dynamic_cast<faiss::IndexIVFPQ*>(faiss::read_index("SPACE1B_4096PQ20.index"));
+ 
+     size_t d = 100;
+ 
+     size_t vec_count, vec_dimension;
+     const size_t part_size = 1048576; // 1MB
+     int part_count = 0;
+ 
+     // Determine the number of vector files (assuming they are named consecutively)
+     printf("[%.3f s] Loading train set\n", elapsed() - t0);
+     while (true) {
+         std::ostringstream oss;
+         oss << "../SPACE1B/vectors.bin/vectors_" << (part_count + 1) << ".bin";
+         std::ifstream file(oss.str(), std::ios::binary);
+         if (!file) break;
+         file.close();
+         part_count++;
+     }
+ 
+     printf("[%.3f s] read the part_count: %d\n", elapsed() - t0, part_count);
+ 
+     // Read vector files
+     int8_t* vecbuf = new int8_t[(size_t)1402020720*100];
+ 
+     {
+         size_t vecbuf_offset = 0;
+ 
+         for (int i = 1; i <= part_count; ++i) {
+             std::ostringstream oss;
+             oss << "../SPACE1B/vectors.bin/vectors_" << i << ".bin";
+             std::ifstream fvec(oss.str(), std::ios::binary);
+ 
+             if (i == 1) {
+                 vec_count = readBinaryInt<int>(fvec);
+                 vec_dimension = readBinaryInt<int>(fvec);
+                 printf("[%.3f s] vec_count: %d, vec_dim: %d\n", elapsed() - t0, vec_count,vec_dimension);
+             }
+ 
+             while (true) {
+                 int8_t buffer[part_size];
+                 fvec.read(reinterpret_cast<char*>(buffer), part_size);
+                 std::streamsize bytes_read = fvec.gcount();
+                 if (bytes_read == 0) break;
+                 std::memcpy(vecbuf + vecbuf_offset, buffer, bytes_read);
+                 vecbuf_offset += bytes_read;
+             }
+             fvec.close();
+         }
+     }
+ 
+     // Read query file
+     std::ifstream fq("../SPACE1B/query.bin", std::ios::binary);
+     int q_count = readBinaryInt<int>(fq);
+     int q_dimension = readBinaryInt<int>(fq);
+     printf("[%.3f s] q_count: %d  q_dimension: %d\n", elapsed() - t0, q_count, q_dimension);
+     int8_t* queries = new int8_t[q_count * q_dimension];
+     readBinaryData(fq, queries, q_count * q_dimension * sizeof(int8_t));
+     fq.close();
+ 
+     // Read truth file
+     std::ifstream ftruth("../SPACE1B/truth.bin", std::ios::binary);
+     int t_count = readBinaryInt<int>(ftruth);
+     int topk = readBinaryInt<int>(ftruth);
+     printf("[%.3f s] t_count: %d  topk: %d\n", elapsed() - t0, t_count, topk);
+     int32_t* truth_vids = new int32_t[t_count * topk];
+     float* truth_distances = new float[t_count * topk];
+     readBinaryData(ftruth, truth_vids, t_count * topk * sizeof(int32_t));
+     readBinaryData(ftruth, truth_distances, t_count * topk * sizeof(float));
+     ftruth.close();
+ 
+     vec_count = 1000000000;
+ 
+     float *xt = new float[vec_count * vec_dimension];
+     index = static_cast<faiss::IndexIVFPQ *>(faiss::index_factory(d, index_key, faiss::METRIC_L2));
+ 
+     printf("[%.3f s] Training on %ld vectors\n", elapsed() - t0, vec_count);
+ 
+
+     for (size_t i = 0; i < vec_count * vec_dimension; ++i) {
+         xt[i] = static_cast<float>(vecbuf[i]);
+     }
+     index->train(100000000, xt);
+     delete[] vecbuf;
+ 
+     printf("[%.3f s] Loading database\n", elapsed() - t0);
+     index->add(vec_count, xt);
+     faiss::write_index(index, "SPACE1B_4096PQ20.index");
+     delete[] xt;
+ 
+     faiss::ArrayInvertedLists *invlists = static_cast<faiss::ArrayInvertedLists*>(index->invlists);
+     std::vector<std::vector<faiss::idx_t>> ids = invlists->ids;// size nlist * n
+     for(int i=0; i< index->nlist; i++)
+     {
+         if( ids[i].size() > 1142000)
+         {
+             printf("[%.3f s] some error cluster %d too large. size: %d\n", elapsed() - t0, i, ids[i].size());
+         }
+     }
+ 
+     printf("[%.3f s] Loading queries\n", elapsed() - t0);
+     size_t nq;
+     float* xq = new float[q_count * q_dimension];
+     for (int i = 0; i < q_count * q_dimension; ++i) {
+         xq[i] = static_cast<float>(queries[i]);
+     }
+     delete[] queries;
+ 
+     size_t k = topk;         // nb of results per query in the GT
+     faiss::idx_t* gt = new faiss::idx_t[t_count * topk]; // nq * k matrix of ground-truth nearest-neighbors
+     for (int i = 0; i < t_count * topk; ++i) {
+         gt[i] = static_cast<faiss::idx_t>(truth_vids[i]);
+     }
+     delete[] truth_vids;
+     delete[] truth_distances;
+ 
+     // Result of the auto-tuning
+     std::string selected_params;
+ 
+     // { // run auto-tuning
+ 
+     //     printf("[%.3f s] Preparing auto-tune criterion 1-recall at 1 "
+     //            "criterion, with k=%ld nq=%ld\n",
+     //            elapsed() - t0,
+     //            k,
+     //            nq);
+ 
+     //     faiss::OneRecallAtRCriterion crit(nq, 1);
+     //     crit.set_groundtruth(k, nullptr, gt);
+     //     crit.nnn = k; // by default, the criterion will request only 1 NN
+ 
+     //     printf("[%.3f s] Preparing auto-tune parameters\n", elapsed() - t0);
+ 
+     //     faiss::ParameterSpace params;
+     //     params.initialize(index);
+ 
+     //     printf("[%.3f s] Auto-tuning over %ld parameters (%ld combinations)\n",
+     //            elapsed() - t0,
+     //            params.parameter_ranges.size(),
+     //            params.n_combinations());
+ 
+     //     faiss::OperatingPoints ops;
+     //     params.explore(index, nq, xq, crit, &ops);
+ 
+     //     printf("[%.3f s] Found the following operating points: \n",
+     //            elapsed() - t0);
+ 
+     //     ops.display();
+ 
+     //     // keep the first parameter that obtains > 0.5 1-recall@1
+     //     for (int i = 0; i < ops.optimal_pts.size(); i++) {
+     //         if (ops.optimal_pts[i].perf > 0.45) {
+     //             selected_params = ops.optimal_pts[i].key;
+     //             break;
+     //         }
+     //     }
+     //     assert(selected_params.size() >= 0 ||
+     //            !"could not find good enough op point");
+     // }
+ 
+     { // Use the found configuration to perform a search
+ 
+         faiss::ParameterSpace params;
+ 
+         printf("[%.3f s] Setting parameter configuration \"%s\" on index\n",
+                elapsed() - t0,
+                selected_params.c_str());
+ 
+         // params.set_index_parameters(index, selected_params.c_str());
+         params.set_index_parameters(index, "nprobe=64");
+ 
+         nq = 1000;
+         float* xq_tmp = new float[100*nq];
+         for(int i=0;i<100*(nq);i++)
+         {
+             xq_tmp[i] = xq[i+100*9000];
+         }
+         printf("[%.6f s] Perform a search on %ld queries\n",
+                elapsed() - t0,
+                nq);
+ 
+         k = 1;
+         // output buffers
+         faiss::idx_t* I = new faiss::idx_t[nq * k];
+         float* D = new float[nq * k];
+ 
+         index->search(nq, xq_tmp, k, D, I);
+ 
+         printf("[%.6f s] Compute recalls\n", elapsed() - t0);
+ 
+         // evaluate result by hand.
+         int n_1 = 0, n_10 = 0, n_100 = 0;
+         for (int i = 0; i < nq; i++) {
+             int gt_nn = gt[(i+9000) * 100];
+             for (int j = 0; j < k; j++) {
+                 if (I[i * k + j] == gt_nn) {
+                     if (j < 1)
+                         n_1++;
+                     if (j < 10)
+                         n_10++;
+                     if (j < 100)
+                         n_100++;
+                 }
+             }
+         }
+         printf("R@1 = %.4f\n", n_1 / float(nq));
+         printf("R@10 = %.4f\n", n_10 / float(nq));
+         printf("R@100 = %.4f\n", n_100 / float(nq));
+         
+ 
+         delete[] I;
+         delete[] D;
+     }
+ 
+     delete[] xq;
+     delete[] gt;
+     delete index;
+     return 0;
+ }
+ 
