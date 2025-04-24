@@ -377,12 +377,12 @@ int main(){
         // }
         // uint32_t begin = perfcounter_get();
         int temp_size = temp_result.size;
-        convertMaxHeapToMinHeap(&temp_result);
+        // convertMaxHeapToMinHeap(&temp_result);
         for(int j=temp_size;j>0;--j)
         {
-            Idx_piar max_r = pop2(&temp_result);
-            if(result.size >= TOPK && result.data[1].fir < max_r.fir)
-                break;
+            Idx_piar max_r = pop(&temp_result);
+            // if(result.size >= TOPK && result.data[1].fir < max_r.fir)
+            //     break;
             sem_take(&result_sem);
             push(&result, max_r.fir, max_r.sed);
             sem_give(&result_sem);
