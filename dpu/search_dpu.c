@@ -13,26 +13,25 @@
 
 #define DATASIZE 1
 #define READSIZE 48 // update_LUT中每次从MRAM读取codebook的大小
-#define CACHE_LEN 6
-#define CACHE_PS_LEN 384
-#define CACHE_PS_LEN_ET 24 //2048/NR_TASKLETS  // 128 
-#define CACHE_LUT_LEN_ET 256 //(8*1024)/NR_TASKLETS 
+#define CACHE_LEN 4
+#define CACHE_PS_LEN 800
+#define CACHE_PS_LEN_ET 80 //2048/NR_TASKLETS  // 128 
+#define CACHE_LUT_LEN_ET 320 //(8*1024)/NR_TASKLETS 
 // #define ETD 16 // EACH TASKLET DEAL WITH IDS AND CODES
 #define ONCEREAD ETD*NR_TASKLETS
 #define TMP ETD*19
 #define EACHTSKREAD MS*KSUB/8/NR_TASKLETS
-__host uint64_t ins_main;
-__host uint64_t ins_insert;
-__host uint64_t ins_update;
-__host uint64_t ins_calculate;
-__host uint64_t ins_total_topk;
+// __host uint32_t ins_main;
+// __host uint32_t ins_insert;
+// __host uint32_t ins_update;
+// __host uint32_t ins_calculate;
+// __host uint32_t ins_total_topk;
 
 int first_run = 1;
 
 BARRIER_INIT(barrier_LUT, NR_TASKLETS);
 BARRIER_INIT(barrier_LUT_FINISH, NR_TASKLETS);
 BARRIER_INIT(barrier_CACHE_FINISH, NR_TASKLETS);
-BARRIER_INIT(barrier_CACHE_BEGIN, NR_TASKLETS);
 BARRIER_INIT(barrier_write, NR_TASKLETS);
 // BARRIER_INIT(barrier_test, NR_TASKLETS);
 SEMAPHORE_INIT(result_sem,1);
@@ -45,7 +44,7 @@ __mram_noinit int8_t codebook_M[MS*KSUB*DSUB];
 __mram_noinit Idx_piar I[TOPK*MAX_Q_O];//返回结果的索引
 // __mram_noinit int32_t dis[TOPK*MAX_Q_O];//返回结果的距离
 __mram_noinit int8_t q_c[MAX_PROBE_NUM * DIMM]; //69KB
-__mram_noinit Code_pair hbm_cached_ps[MAX_DPU_ID*CACHE_PS_LEN];
+// __mram_noinit Code_pair hbm_cached_ps[MAX_DPU_ID*CACHE_PS_LEN];
 
 __host int32_t qCentroid[MAX_PROBE_NUM]; //556B
 __host int32_t q_o[MAX_Q_O]; //468 B
@@ -55,7 +54,7 @@ __dma_aligned Heap_q result;
 __host int32_t offset[MAX_DPU_ID+1];//176B
 __host int32_t centroid_id[MAX_DPU_ID];//172B
 
-__dma_aligned uint16_t LUT[KSUB*MS + 4096]; //16KB KSUB*MS
+__dma_aligned uint16_t LUT[KSUB*MS + 1]; //16KB KSUB*MS
 __host uint16_t* cache_LUT = &LUT[KSUB*MS];//12KB  最大18KB
 // __dma_aligned int8_t codebook_W[CODEBOOK_SIZE];//8KB
 // __dma_aligned bool LUT_calculated[KSUB*MS];//1KB
@@ -65,7 +64,7 @@ __dma_aligned int8_t cur_q_c[DIMM];//512B
 // __dma_aligned int8_t rasidual[NR_TASKLETS];//512B
 
 __dma_aligned int8_t* codebook_LUT = (int8_t*)cur_codes;
-__dma_aligned Code_pair* cached_ps = (Code_pair*)cur_codes;//[ONCEREAD * CODE_SIZE / 2];
+// __dma_aligned Code_pair* cached_ps = (Code_pair*)cur_codes;//[ONCEREAD * CODE_SIZE / 2];
 
 // Heapify function for maximum heap
 void minHeapify(Heap_q* heap, int i) {
@@ -145,6 +144,7 @@ void push(Heap_q* sto, int32_t fir, int64_t sed){
 
 void updated_LUT(int i, int c_id)
 {
+    c_id = 0;
     int t_id = me();
     if(t_id==0)
         mram_read(&q_c[i*DIMM],cur_q_c,ALIGN(MIN(2048,DIMM*sizeof(int8_t)),8));
@@ -200,33 +200,30 @@ void updated_LUT(int i, int c_id)
         next_adr = next_adr + KSUB*DSUB;
     }
     barrier_wait(&barrier_LUT_FINISH);
-    if(t_id==0)
-        mram_read(&hbm_cached_ps[c_id * CACHE_PS_LEN], cached_ps ,ALIGN(MIN(2048,CACHE_PS_LEN * sizeof(Code_pair)),8));
-    barrier_wait(&barrier_CACHE_BEGIN);
-    // 遍历所有可能的二进制索引
+    // // 遍历所有可能的二进制索引
     // mram_read(&hbm_cached_ps[c_id * CACHE_PS_LEN + t_id * CACHE_PS_LEN_ET], cached_ps + t_id * CACHE_PS_LEN_ET,ALIGN(MIN(2048,CACHE_PS_LEN_ET * sizeof(Code_pair)),8));
-    int LUT_begin_idx = 0;
-    uint16_t sum = 0;
-    for(int k= t_id * CACHE_PS_LEN_ET ; k < (t_id+1) * CACHE_PS_LEN_ET; k+= CACHE_LEN){
-        for(int j = 0; j < (1<<CACHE_LEN) ; j++)
-        {
-            sum = 0;
-            for(int m = 0; m<CACHE_LEN; m++)
-            {
-                if( j & (1 << m)){
-                    // if(cached_ps[k+m].fir*KSUB + cached_ps[k+m].sed >= 8192)
-                    // {
-                    //     printf("some error in LUT, fir: %d, sed: %d\n", cached_ps[k+m].fir, cached_ps[k+m].sed);
-                    //     continue;
-                    // }
-                    sum += LUT[cached_ps[k+m].fir*KSUB + cached_ps[k+m].sed];
-                }
-            }
-            cache_LUT[t_id * CACHE_LUT_LEN_ET + LUT_begin_idx * (1<<CACHE_LEN) + j] = sum;
-        }
-        LUT_begin_idx++;
-    }
-    barrier_wait(&barrier_CACHE_FINISH);
+    // int LUT_begin_idx = 0;
+    // uint16_t sum = 0;
+    // for(int k= t_id * CACHE_PS_LEN_ET ; k < (t_id+1) * CACHE_PS_LEN_ET; k+= CACHE_LEN){
+    //     for(int j = 0; j < (1<<CACHE_LEN) ; j++)
+    //     {
+    //         sum = 0;
+    //         for(int m = 0; m<CACHE_LEN; m++)
+    //         {
+    //             if( j & (1 << m)){
+    //                 // if(cached_ps[k+m].fir*KSUB + cached_ps[k+m].sed >= 8192)
+    //                 // {
+    //                 //     printf("some error in LUT, fir: %d, sed: %d\n", cached_ps[k+m].fir, cached_ps[k+m].sed);
+    //                 //     continue;
+    //                 // }
+    //                 sum += LUT[cached_ps[k+m].fir*KSUB + cached_ps[k+m].sed];
+    //             }
+    //         }
+    //         cache_LUT[t_id * CACHE_LUT_LEN_ET + LUT_begin_idx * (1<<CACHE_LEN) + j] = sum;
+    //     }
+    //     LUT_begin_idx++;
+    // }
+    // barrier_wait(&barrier_CACHE_FINISH);
     // sem_take(&write_sem);
     // if(first_run)
     // {
@@ -263,7 +260,7 @@ void updated_LUT(int i, int c_id)
 
 int main(){
     // Profiling
-    perfcounter_config(COUNT_CYCLES, true);
+    // perfcounter_config(COUNT_CYCLES, true);
     // printf("current thread:%d ", me());
 
     int t_id = me();
@@ -306,18 +303,18 @@ int main(){
                 }
             }
             uint32_t ids_size = offset[c_id +1] - offset[c_id];
-            uint32_t begin = perfcounter_get();
+            // uint32_t begin = perfcounter_get();
             updated_LUT(j, c_id);
-            uint32_t end = perfcounter_get();
-            if(t_id==0)
-                ins_update += (end - begin);
+            // uint32_t end = perfcounter_get();
+            // if(t_id==0)
+            //     ins_update += (end - begin);
             copied_ids = 0; 
             while(copied_ids < ids_size)
             {
-                uint32_t begin2 = perfcounter_get();
+                // uint32_t begin2 = perfcounter_get();
                 len = MIN(ONCEREAD, (ids_size-copied_ids));
                 mram_read(&ids[offset[c_id]+copied_ids+t_id * ETD],cur_ids + t_id * ETD, ALIGN(MIN(2048,ETD*8),8));
-                mram_read(&codes[(offset[c_id]+copied_ids+t_id * ETD)*CODE_SIZE], cur_codes + t_id * ETD * CODE_SIZE, ALIGN(MIN(2048,(ETD)*CODE_SIZE*2),8));
+                mram_read(&codes[(offset[c_id]+copied_ids+t_id * ETD)*CODE_SIZE], cur_codes + t_id * ETD * CODE_SIZE, ALIGN(MIN(2048,(ETD)*CODE_SIZE)*2,8));
                 copied_ids += ONCEREAD;
                 int dist_size = MIN(len, (t_id+1) * ETD);
                 // uint32_t begin2 = perfcounter_get();
@@ -325,11 +322,10 @@ int main(){
                 {
                     int32_t dis_te = 0;
                     // int LUT_len = cur_codes[ita*CODE_SIZE];
-                    uint16_t code_len = (cur_codes[(ita+1)*CODE_SIZE-1]) < CODE_SIZE ? cur_codes[(ita+1)*CODE_SIZE-1]:CODE_SIZE;
                     // LUT_len ++ ;
                     // int no_cache_len = (((cur_codes[ita*CODE_SIZE]) & 0xf ) + 1) * 2;
                     uint16_t* c_codes = &cur_codes[ita*CODE_SIZE];
-                    for(uint8_t k = 0; k < (uint8_t)code_len; k++)
+                    for(uint8_t k = 0; k < 12; k++)
                     {
                         // if(cur_codes[ita*CODE_SIZE + LUT_idx + 3]+k*KSUB > 8192)
                         // {
@@ -347,7 +343,7 @@ int main(){
                         // }
                     }
                     // sem_take(&result_sem); // 加锁大概多 20 ms
-                    begin = perfcounter_get();
+                    // begin = perfcounter_get();
                     // printf("ita: %d tasklet id: %d ",ita,t_id);
                     // if(cur_ids[ita]==145976)
                     // {
@@ -362,14 +358,14 @@ int main(){
                     //     printf("\n j:%d ita: %d tasklet id: %d cur_ids[ita]: %lld dis_te: %u \n",j,ita,t_id,cur_ids[ita],dis_te);
                     // }
                     push(&temp_result, dis_te , cur_ids[ita]);
-                    end = perfcounter_get();
-                    if(t_id==0)
-                        ins_insert += (end - begin);
+                    // end = perfcounter_get();
+                    // if(t_id==0)
+                    //     ins_insert += (end - begin);
                     // sem_give(&result_sem);
                 }
-                uint32_t end2 = perfcounter_get();
-                if(t_id==0)
-                    ins_calculate += (end2 - begin2);
+                // uint32_t end2 = perfcounter_get();
+                // if(t_id==0)
+                //     ins_calculate += (end2 - begin2);
             }
         }
         // for(int m = 0; m< TOPK ; m++)
@@ -379,21 +375,21 @@ int main(){
         //         printf("i:%d q_o[i+1]:%d cur_I[%d]: %lld \n ",i,q_o[i+1], m,cur_I[m]);
         //     }
         // }
-        uint32_t begin = perfcounter_get();
+        // uint32_t begin = perfcounter_get();
         int temp_size = temp_result.size;
-        convertMaxHeapToMinHeap(&temp_result);
+        // convertMaxHeapToMinHeap(&temp_result);
         for(int j=temp_size;j>0;--j)
         {
-            Idx_piar max_r = pop2(&temp_result);
-            if(result.size >= TOPK && result.data[1].fir < max_r.fir)
-                break;
+            Idx_piar max_r = pop(&temp_result);
+            // if(result.size >= TOPK && result.data[1].fir < max_r.fir)
+            //     break;
             sem_take(&result_sem);
             push(&result, max_r.fir, max_r.sed);
             sem_give(&result_sem);
         }
-        uint32_t end = perfcounter_get();
-        if(t_id==0)
-            ins_total_topk += (end - begin);
+        // uint32_t end = perfcounter_get();
+        // if(t_id==0)
+        //     ins_total_topk += (end - begin);
         //写回当前query 的结果回结果数组
         // printf("i: %d tasklet id: %d cur_I[0]: %lld cur_dis[0]: %u \n",i,t_id,cur_I[0],cur_dis[0]);
         barrier_wait(&barrier_write);
@@ -416,16 +412,16 @@ int main(){
         }
         // barrier_wait(&barrier_write);
     }
-    if(t_id==0)
-        ins_main = perfcounter_get();
+    // if(t_id==0)
+    //     ins_main = perfcounter_get();
     // if(q_o[1]!=-1)
     // {
     //     printf("tasklet id: %d finish\n",t_id);
     // }
-    if(t_id==0)
-    {
-        printf("ins_main: %lu, ins_update: %lu, ins_insert:%lu, ins_calculate:%lu, ins_total_topk:%lu\n", ins_main,ins_update, ins_insert, ins_calculate,ins_total_topk);
-    }
+    // if(t_id==0)
+    // {
+    //     printf("ins_main: %u, ins_update: %u, ins_insert:%u, ins_calculate:%u, ins_total_topk:%u\n", ins_main,ins_update, ins_insert, ins_calculate,ins_total_topk);
+    // }
     return 0;
 }
 
