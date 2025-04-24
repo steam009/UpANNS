@@ -129,7 +129,7 @@ int main() {
 
     faiss::IndexIVFPQ* index;
 
-    index = dynamic_cast<faiss::IndexIVFPQ*>(faiss::read_index("sift1B_8192PQ16.index"));
+    index = dynamic_cast<faiss::IndexIVFPQ*>(faiss::read_index("sift1B_4096PQ16.index"));
 
     size_t d = 128;
 
