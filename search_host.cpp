@@ -30,7 +30,7 @@
 #include <omp.h>
 
 #ifndef DPU_BINARY
-#    define DPU_BINARY "/home/cst/PQ-try/dpu/search_dpu" // Relative path regarding the PyTorch code
+#    define DPU_BINARY "./dpu/search_dpu" // Relative path regarding the PyTorch code
 #endif
 #define THREADSHOLD 1
 #define CACHE_LEN 4
@@ -225,7 +225,7 @@ int main() {
 
     uint32_t nr_of_dpus;
     // auto system = dpu::DpuSet::allocate(NR_DPUS);
-    // system.load("/home/cst/PQ-try/dpu/search_dpu");
+    // system.load("./dpu/search_dpu");
     nr_of_dpus = NR_DPUS;
 
     int32_t d = 128;
@@ -1101,7 +1101,7 @@ int main() {
     int32_t dpus_id;
 
     auto system = dpu::DpuSet::allocate(NR_DPUS);
-    system.load("/home/cst/PQ-try/dpu/search_dpu");
+    system.load("./dpu/search_dpu");
     nr_of_dpus = system.dpus().size();
     printf("Allocated %d DPU(s)\n", nr_of_dpus);
 
