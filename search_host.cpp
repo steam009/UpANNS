@@ -265,12 +265,41 @@ int main() {
     // delete[] xb;
 
     faiss::ArrayInvertedLists *invlists = static_cast<faiss::ArrayInvertedLists*>(index->invlists);
-    std::vector<std::vector<uint8_t>> codes = invlists->codes; // size nlist * n
-    std::vector<std::vector<faiss::idx_t>> ids = invlists->ids;// size nlist * n
+    // Create vectors and copy data from invlists
+    std::vector<std::vector<uint8_t>> codes;
+    codes.resize(invlists->codes.size());
+    for (size_t i = 0; i < invlists->codes.size(); i++) {
+        const auto& code_vec = invlists->codes[i];
+        codes[i].resize(code_vec.size());
+        std::copy(code_vec.begin(), code_vec.end(), codes[i].begin());
+    }
+    
+    std::vector<std::vector<faiss::idx_t>> ids;
+    ids.resize(invlists->ids.size());
+    for (size_t i = 0; i < invlists->ids.size(); i++) {
+        const auto& id_vec = invlists->ids[i];
+        ids[i].resize(id_vec.size());
+        std::copy(id_vec.begin(), id_vec.end(), ids[i].begin());
+    }
+    
     int32_t nlist = index->nlist;
     int32_t code_size = index->invlists->code_size;
 
-    std::vector<std::vector<uint8_t>> source = invlists->codes; 
+    std::vector<std::vector<uint8_t>> source;
+    source.resize(invlists->codes.size());
+    for (size_t i = 0; i < invlists->codes.size(); i++) {
+        const auto& code_vec = invlists->codes[i];
+        source[i].resize(code_vec.size());
+        std::copy(code_vec.begin(), code_vec.end(), source[i].begin());
+    }
+
+    // faiss::ArrayInvertedLists *invlists = static_cast<faiss::ArrayInvertedLists*>(index->invlists);
+    // std::vector<std::vector<uint8_t>> codes = invlists->codes; // size nlist * n
+    // std::vector<std::vector<faiss::idx_t>> ids = invlists->ids;// size nlist * n
+    // int32_t nlist = index->nlist;
+    // int32_t code_size = index->invlists->code_size;
+
+    // std::vector<std::vector<uint8_t>> source = invlists->codes; 
     std::vector<std::vector<uint16_t>> new_codes(source.size());
 
     for (size_t i = 0; i < source.size(); ++i) {

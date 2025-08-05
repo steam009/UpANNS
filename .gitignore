@@ -13,3 +13,5 @@ test*
 *pq*
 *qs*
 /SPACE*
+faiss/
+sift1B/

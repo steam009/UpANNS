@@ -53,8 +53,10 @@ APP_SOURCES         =
 APP_MAIN            = search_host.cpp
 APP_OBJS            = $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(APP_SOURCES) $(APP_MAIN))
 
+LD_LIBRARY_PATH            ?= /home/cst
+
 # Includes
-INC                 = -Iinclude -Ifaiss -L/home/cst
+INC                 = -Iinclude -Ifaiss -L$(LD_LIBRARY_PATH)
 
 # Test sources and artifacts
 TEST_BIN            = $(BUILD_DIR)/$(PROJECT)_tests
@@ -69,7 +71,7 @@ DEPS                = $(APP_OBJS:.o=.d) \
 CC                  = g++
 COMMON_CFLAGS       = -lm --std=c++11 -fPIC -lstdc++ # -Wall -Wextra -MMD -Werror
 SHARED_CFLAGS       = -shared -Wl,-soname,$(PROJECT)
-DPU_OPTS            = `dpu-pkg-config --cflags --libs dpu` -L/home/cst -lfaiss -fopenmp
+DPU_OPTS            = `dpu-pkg-config --cflags --libs dpu` -L$(LD_LIBRARY_PATH) -lfaiss -fopenmp
 
 # Tools
 CLANG_FORMAT        = clang-format
